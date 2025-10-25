@@ -1,0 +1,4 @@
+model_path: ./models/aprilnet_v1.pt
+tag_type: tagStandard41h12
+batch_size: 64
+output_file: ./results/evaluation.json

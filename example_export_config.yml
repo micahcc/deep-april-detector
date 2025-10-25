@@ -1,0 +1,5 @@
+model_path: ./models/aprilnet_v1.pt
+output_path: ./exported/aprilnet_v1.onnx
+tag_type: tagStandard41h12
+format: onnx
+quantize: true
