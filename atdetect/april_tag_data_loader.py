@@ -54,6 +54,9 @@ class AprilTagDataLoader:
         bg_color_range: Tuple[int, int] = (5000, 20000),  # 16-bit range
         bg_complexity: BackgroundComplexity = BackgroundComplexity.MEDIUM,
         brightness_variation_range: float = 0.3,
+        min_rotation: float = 0.0,  # Minimum rotation angle in degrees
+        max_rotation: float = 360.0,  # Maximum rotation angle in degrees
+        skew_range: float = 0.1,  # Range of skew transformation (0-1)
     ):  # Controls the amount of brightness variation
         """
         Initialize AprilTag data loader.
@@ -82,6 +85,9 @@ class AprilTagDataLoader:
         self.brightness_variation_range = max(
             0.0, min(1.0, brightness_variation_range)
         )  # Clamp to [0, 1]
+        self.min_rotation = min_rotation
+        self.max_rotation = max_rotation
+        self.skew_range = max(0.0, min(1.0, skew_range))  # Clamp to [0, 1]
 
         # Load template paths and class numbers
         self.template_paths, self.class_nums = self._load_templates()
@@ -122,6 +128,158 @@ class AprilTagDataLoader:
         )
         scaled_mask = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
         return scaled_template, scaled_mask
+
+    @staticmethod
+    def _transform_template(
+        template: np.ndarray,
+        mask: np.ndarray,
+        keypoints: List[KeyPoint],
+        angle: float,
+        skew_range: float,
+    ) -> Tuple[np.ndarray, np.ndarray, List[KeyPoint]]:
+        """Apply rotation and skew transformations to template, mask, and keypoints.
+
+        Args:
+            template: Template image to transform
+            mask: Mask to transform
+            keypoints: Keypoints to transform
+            angle: Rotation angle in degrees (clockwise)
+            skew_range: Range of skew transformation (-skew_range to +skew_range)
+
+        Returns:
+            Tuple of (transformed_template, transformed_mask, transformed_keypoints)
+        """
+        # Get dimensions of the template
+        h, w = template.shape[:2]
+        center = (w // 2, h // 2)  # Center of the template
+
+        # Get rotation matrix
+        rotation_matrix = cv2.getRotationMatrix2D(
+            center, -angle, 1.0
+        )  # Negative angle for clockwise rotation
+
+        # Calculate new dimensions after rotation to ensure the entire template is visible
+        # Convert rotation matrix to radians
+        angle_rad = math.radians(angle)
+        cos_angle = abs(math.cos(angle_rad))
+        sin_angle = abs(math.sin(angle_rad))
+
+        # Calculate new dimensions for rotation
+        new_w = int(w * cos_angle + h * sin_angle)
+        new_h = int(w * sin_angle + h * cos_angle)
+
+        # Adjust rotation matrix to account for new dimensions
+        rotation_matrix[0, 2] += (new_w - w) // 2
+        rotation_matrix[1, 2] += (new_h - h) // 2
+
+        # Apply rotation to template and mask
+        rotated_template = cv2.warpAffine(
+            template,
+            rotation_matrix,
+            (new_w, new_h),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+        )
+        rotated_mask = cv2.warpAffine(
+            mask,
+            rotation_matrix,
+            (new_w, new_h),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+        )
+
+        # Rotate keypoints
+        rotated_keypoints = []
+        for kp in keypoints:
+            # Translate keypoint to center, then apply rotation matrix
+            kp_matrix = np.array([kp.x, kp.y, 1.0])
+            rotated_x, rotated_y = rotation_matrix @ kp_matrix
+            rotated_keypoints.append(KeyPoint(x=float(rotated_x), y=float(rotated_y)))
+
+        # Now apply skew transformation
+        # Create random skew factors
+        skew_x = random.uniform(-skew_range, skew_range)
+        skew_y = random.uniform(-skew_range, skew_range)
+
+        # Create skew transformation matrix (3x3 for homography)
+        # [1, skew_x, 0]   [x]   [x + skew_x*y]
+        # [skew_y, 1, 0] * [y] = [skew_y*x + y]
+        # [0, 0, 1]        [1]   [1]
+        skew_matrix = np.array(
+            [[1.0, skew_x, 0], [skew_y, 1.0, 0], [0.0, 0.0, 1.0]], dtype=np.float32
+        )
+
+        # Calculate the bounds after skew
+        corners = np.array(
+            [
+                [0, 0, 1],  # Top-left
+                [new_w - 1, 0, 1],  # Top-right
+                [new_w - 1, new_h - 1, 1],  # Bottom-right
+                [0, new_h - 1, 1],  # Bottom-left
+            ]
+        )
+
+        # Apply skew to corners
+        skewed_corners = []
+        for corner in corners:
+            skewed_corner = skew_matrix @ corner
+            skewed_corners.append([skewed_corner[0], skewed_corner[1]])
+
+        skewed_corners = np.array(skewed_corners)
+
+        # Calculate new bounds
+        min_x, min_y = np.min(skewed_corners, axis=0).astype(int)
+        max_x, max_y = np.ceil(np.max(skewed_corners, axis=0)).astype(int)
+
+        # Ensure positive coordinates by adding translation if needed
+        tx, ty = 0, 0
+        if min_x < 0:
+            tx = -min_x
+        if min_y < 0:
+            ty = -min_y
+
+        # Add translation to skew_matrix
+        translation_matrix = np.array(
+            [[1.0, 0.0, tx], [0.0, 1.0, ty], [0.0, 0.0, 1.0]], dtype=np.float32
+        )
+
+        # Combine translation and skew
+        final_skew_matrix = translation_matrix @ skew_matrix
+
+        # Calculate new dimensions
+        final_w = max_x - min_x + 1 + int(tx)
+        final_h = max_y - min_y + 1 + int(ty)
+
+        # Apply skew transformation to the rotated template and mask
+        # We need the 2x3 portion of the 3x3 matrix for warpAffine
+        skew_matrix_2x3 = final_skew_matrix[:2, :]
+
+        final_template = cv2.warpAffine(
+            rotated_template,
+            skew_matrix_2x3,
+            (final_w, final_h),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+        )
+        final_mask = cv2.warpAffine(
+            rotated_mask,
+            skew_matrix_2x3,
+            (final_w, final_h),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+        )
+
+        # Apply skew to rotated keypoints
+        final_keypoints = []
+        for kp in rotated_keypoints:
+            # Convert to homogeneous coordinates and apply skew
+            kp_matrix = np.array([kp.x, kp.y, 1.0])
+            skewed_point = final_skew_matrix @ kp_matrix
+            final_keypoints.append(
+                KeyPoint(x=float(skewed_point[0]), y=float(skewed_point[1]))
+            )
+
+        return final_template, final_mask, final_keypoints
 
     def generate_sample(self) -> SyntheticImage:
         """Generate a synthetic image with AprilTag templates."""
@@ -188,10 +346,24 @@ class AprilTagDataLoader:
                 for kp in keypoints
             ]
 
-            # No perspective transform - keep the scaled template, mask, and keypoints
-            warped_template = scaled_template
-            warped_mask = scaled_mask
-            warped_keypoints = scaled_keypoints
+            # Choose a random rotation angle
+            rotation_angle = random.uniform(self.min_rotation, self.max_rotation)
+
+            # Apply transforms (rotation and skew) to the scaled template, mask, and keypoints
+            transformed_template, transformed_mask, transformed_keypoints = (
+                self._transform_template(
+                    scaled_template,
+                    scaled_mask,
+                    scaled_keypoints,
+                    rotation_angle,
+                    self.skew_range,
+                )
+            )
+
+            # Use the transformed template, mask, and keypoints
+            warped_template = transformed_template
+            warped_mask = transformed_mask
+            warped_keypoints = transformed_keypoints
 
             # Get dimensions of the warped template
             warped_h, warped_w = warped_template.shape[:2]
@@ -223,12 +395,16 @@ class AprilTagDataLoader:
                 KeyPoint(x=kp.x + x_pos, y=kp.y + y_pos) for kp in warped_keypoints
             ]
 
-            # Calculate bounding box for the placed tag
-            # For accurate bounding box, use the template dimensions rather than just keypoints
-            x_min = float(x_pos)
-            y_min = float(y_pos)
-            x_max = float(x_pos + warped_w - 1)  # -1 because it's zero-indexed
-            y_max = float(y_pos + warped_h - 1)  # -1 because it's zero-indexed
+            # Calculate bounding box for the placed tag based on the rotated keypoints
+            # Since we've rotated the template, we need to use the keypoints to determine the bounding box
+            kp_coords = np.array(
+                [[kp.x + x_pos, kp.y + y_pos] for kp in warped_keypoints]
+            )
+            x_min = float(np.min(kp_coords[:, 0]))
+            y_min = float(np.min(kp_coords[:, 1]))
+            x_max = float(np.max(kp_coords[:, 0]))
+            y_max = float(np.max(kp_coords[:, 1]))
+
             bbox = BoundingBox(
                 x_min=x_min,
                 y_min=y_min,
@@ -236,12 +412,9 @@ class AprilTagDataLoader:
                 y_max=y_max,
             )
 
-            # Make sure keypoints are exactly at the corners of the placed template
+            # Use the rotated keypoints for placement in the final image
             placed_keypoints = [
-                KeyPoint(x=x_min, y=y_min),  # Top-left
-                KeyPoint(x=x_max, y=y_min),  # Top-right
-                KeyPoint(x=x_max, y=y_max),  # Bottom-right
-                KeyPoint(x=x_min, y=y_max),  # Bottom-left
+                KeyPoint(x=kp.x + x_pos, y=kp.y + y_pos) for kp in warped_keypoints
             ]
 
             # No need to convert to PIL, work directly with numpy arrays
