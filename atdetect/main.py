@@ -1,58 +1,19 @@
 import argparse
 import sys
 import dataclasses
-from dataclasses import dataclass
-from typing import Optional, List, Dict, Any
 import yaml
+import os
+import numpy as np
+import cv2
 
+# Import configuration classes
+from atdetect.train_config import TrainConfig
+from atdetect.eval_config import EvalConfig
+from atdetect.export_config import ExportConfig
 
-@dataclass
-class TrainConfig:
-    """Configuration for training."""
-
-    model_name: str
-    learning_rate: float
-    batch_size: int
-    epochs: int
-    tag_type: str  # One of: tag16h5, tagCircle21h7, or tagStandard41h12
-    val_split: float = 0.2
-    checkpoint_dir: Optional[str] = None
-
-    def __post_init__(self):
-        valid_tag_types = ["tag16h5", "tagCircle21h7", "tagStandard41h12"]
-        if self.tag_type not in valid_tag_types:
-            raise ValueError(f"tag_type must be one of {', '.join(valid_tag_types)}")
-
-
-@dataclass
-class EvalConfig:
-    """Configuration for evaluation."""
-
-    model_path: str
-    tag_type: str  # Same tag type used for training
-    batch_size: int = 64
-    output_file: Optional[str] = None
-
-    def __post_init__(self):
-        valid_tag_types = ["tag16h5", "tagCircle21h7", "tagStandard41h12"]
-        if self.tag_type not in valid_tag_types:
-            raise ValueError(f"tag_type must be one of {', '.join(valid_tag_types)}")
-
-
-@dataclass
-class ExportConfig:
-    """Configuration for export."""
-
-    model_path: str
-    output_path: str
-    tag_type: str  # Same tag type used for training
-    format: str = "onnx"  # onnx, tflite, etc.
-    quantize: bool = False
-
-    def __post_init__(self):
-        valid_tag_types = ["tag16h5", "tagCircle21h7", "tagStandard41h12"]
-        if self.tag_type not in valid_tag_types:
-            raise ValueError(f"tag_type must be one of {', '.join(valid_tag_types)}")
+# Import data loader components
+from atdetect.background_complexity import BackgroundComplexity
+from atdetect.april_tag_data_loader import AprilTagDataLoader
 
 
 def load_config(config_path: str, config_class):
@@ -102,13 +63,6 @@ def train(args):
     )
 
     # Create data loader with complex backgrounds
-    from atdetect.data_loader import AprilTagDataLoader
-    import numpy as np
-    import cv2
-    import os
-
-    from atdetect.data_loader import BackgroundComplexity
-
     data_loader = AprilTagDataLoader(
         tag_type=config.tag_type,
         min_scale_factor=1.5,

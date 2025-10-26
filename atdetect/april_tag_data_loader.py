@@ -1,3 +1,6 @@
+"""
+Data loader for AprilTag templates.
+"""
 import os
 import random
 import numpy as np
@@ -6,20 +9,25 @@ from typing import List, Tuple, Dict, Optional
 import cv2
 from pathlib import Path
 from PIL import Image, ImageOps, ImageFilter, ImageDraw
-from enum import Enum, auto
 import math
 
+from atdetect.bounding_box import BoundingBox
+from atdetect.key_point import KeyPoint
+from atdetect.april_tag_annotation import AprilTagAnnotation
+from atdetect.synthetic_image import SyntheticImage
+
 # Import background generation functionality
+from atdetect.background_complexity import BackgroundComplexity
+from atdetect.background_type import BackgroundType
+from atdetect.direction import Direction
+from atdetect.filter_type import FilterType
+from atdetect.gradient_type import GradientType
+from atdetect.noise_type import NoiseType
+from atdetect.pattern_type import PatternType
+from atdetect.shape_type import ShapeType
+from atdetect.effect_type import EffectType
+
 from atdetect.background_generators import (
-    BackgroundComplexity,
-    BackgroundType,
-    Direction,
-    FilterType,
-    GradientType,
-    NoiseType,
-    PatternType,
-    ShapeType,
-    EffectType,
     UINT16_MAX,
     generate_random_background,
     apply_mandelbrot_effect,
@@ -28,44 +36,6 @@ from atdetect.background_generators import (
     create_radial_gradient_background,
     create_linear_gradient_background,
 )
-
-
-@dataclass
-class BoundingBox:
-    """Bounding box in [x_min, y_min, x_max, y_max] format."""
-
-    x_min: float
-    y_min: float
-    x_max: float
-    y_max: float
-
-
-@dataclass
-class KeyPoint:
-    """Keypoint with x, y coordinates."""
-
-    x: float
-    y: float
-
-
-@dataclass
-class AprilTagAnnotation:
-    """Annotation for a single AprilTag instance."""
-
-    class_name: str  # e.g., 'tag16h5'
-    class_num: int  # Numeric ID of the tag
-    bbox: BoundingBox
-    keypoints: List[KeyPoint]  # 4 keypoints, one for each corner
-
-
-@dataclass
-class SyntheticImage:
-    """Synthetic image with AprilTag annotations."""
-
-    image: np.ndarray  # H x W x C image (16-bit)
-    annotations: List[AprilTagAnnotation]
-    height: int
-    width: int
 
 
 class AprilTagDataLoader:
