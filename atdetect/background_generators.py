@@ -211,9 +211,12 @@ def create_perlin_noise_background(
     # Generate base noise
     base_height = height // scale + 1
     base_width = width // scale + 1
-    base = np.random.randint(color_range[0], color_range[1], (base_height, base_width))
+    base = np.random.randint(
+        color_range[0], color_range[1], (base_height, base_width), dtype=np.uint16
+    )
 
     # Resize to full size using bilinear interpolation
+
     scaled = cv2.resize(base, (width, height), interpolation=cv2.INTER_LINEAR)
 
     # Add octaves for more detail
@@ -224,7 +227,7 @@ def create_perlin_noise_background(
 
         small_height = height // small_scale + 1
         small_width = width // small_scale + 1
-        small = np.random.randint(0, 2000, (small_height, small_width))
+        small = np.random.randint(0, 2000, (small_height, small_width), dtype=np.uint16)
         small_scaled = cv2.resize(
             small, (width, height), interpolation=cv2.INTER_LINEAR
         )

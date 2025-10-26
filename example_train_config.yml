@@ -2,5 +2,5 @@ model_name: aprilnet_v1
 learning_rate: 0.001
 batch_size: 32
 epochs: 100
-tag_type: tagStandard41h12
+tag_type: tag16h5
 checkpoint_dir: ./checkpoints

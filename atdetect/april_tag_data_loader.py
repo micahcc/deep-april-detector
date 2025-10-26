@@ -50,7 +50,6 @@ class AprilTagDataLoader:
         max_scale_factor: float = 5.0,
         min_img_size: int = 256,
         max_img_size: int = 1024,
-        perspective_transform_range: float = 0.2,
         tags_per_image: Tuple[int, int] = (1, 3),
         bg_color_range: Tuple[int, int] = (5000, 20000),  # 16-bit range
         bg_complexity: BackgroundComplexity = BackgroundComplexity.MEDIUM,
@@ -66,7 +65,6 @@ class AprilTagDataLoader:
             max_scale_factor: Maximum scale factor for templates.
             min_img_size: Minimum image size (both H and W).
             max_img_size: Maximum image size (both H and W).
-            perspective_transform_range: Range of perspective transform.
             tags_per_image: Range (min, max) of number of tags per image.
             bg_color_range: Range of background color (min, max) for 16-bit images.
         """
@@ -78,7 +76,6 @@ class AprilTagDataLoader:
         self.max_scale_factor = max(self.min_scale_factor + 0.5, max_scale_factor)
         self.min_img_size = max(64, min_img_size)  # Ensure minimum size is at least 64
         self.max_img_size = max(self.min_img_size + 64, max_img_size)
-        self.perspective_transform_range = perspective_transform_range
         self.tags_per_image = tags_per_image
         self.bg_color_range = bg_color_range
         self.bg_complexity = bg_complexity
@@ -126,129 +123,6 @@ class AprilTagDataLoader:
         scaled_mask = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
         return scaled_template, scaled_mask
 
-    @staticmethod
-    def _build_perspective_matrix(
-        h: int, w: int, perspective_range: float
-    ) -> np.ndarray:
-        """
-        Build a random perspective transformation matrix.
-
-        Args:
-            h: Height of the image
-            w: Width of the image
-            perspective_range: Range of perspective distortion (0-1)
-
-        Returns:
-            3x3 perspective transformation matrix
-        """
-        # Create a random center for the transform
-        center_x = w / 2
-        center_y = h / 2
-
-        # Generate random rotation angle
-        angle = random.uniform(-45, 45)  # degrees
-
-        # Generate random skew factors
-        skew_x = random.uniform(-perspective_range, perspective_range)
-        skew_y = random.uniform(-perspective_range, perspective_range)
-
-        # Create rotation matrix
-        rotation_matrix = cv2.getRotationMatrix2D((center_x, center_y), angle, 1.0)
-        rotation_matrix = np.vstack([rotation_matrix, [0, 0, 1]])  # Convert to 3x3
-
-        # Create skew matrix
-        skew_matrix = np.array(
-            [[1.0 - skew_x, skew_x, 0], [skew_y, 1.0 - skew_y, 0], [0, 0, 1.0]],
-            dtype=np.float32,
-        )
-
-        # Combine transforms
-        perspective_matrix = skew_matrix @ rotation_matrix
-
-        return perspective_matrix
-
-    @staticmethod
-    def _apply_perspective_transform(
-        image: np.ndarray,
-        mask: np.ndarray,
-        keypoints: List[KeyPoint],
-        perspective_range: float,
-    ) -> Tuple[np.ndarray, np.ndarray, List[KeyPoint]]:
-        """
-        Apply random perspective transform to image, mask, and update keypoints.
-
-        Returns:
-            Tuple of (transformed image, transformed mask, transformed keypoints)
-        """
-        h, w = image.shape[:2]
-
-        # Build perspective matrix
-        perspective_mat = AprilTagDataLoader._build_perspective_matrix(
-            h, w, perspective_range
-        )
-
-        # Calculate the bounds needed for the transformed image by transforming corners
-        corners = np.array(
-            [
-                [0, 0, 1.0],  # Top-left
-                [w - 1, 0, 1.0],  # Top-right
-                [w - 1, h - 1, 1.0],  # Bottom-right
-                [0, h - 1, 1.0],  # Bottom-left
-            ]
-        )
-
-        # Apply perspective transform to corners
-        transformed_corners = []
-        for corner in corners:
-            p_transformed = perspective_mat @ corner
-            # Convert from homogeneous coordinates
-            assert p_transformed[2] != 0, "Invalid perspective"
-            x_new, y_new = p_transformed[:2] / p_transformed[2]
-            transformed_corners.append([x_new, y_new])
-
-        transformed_corners = np.array(transformed_corners)
-
-        # Calculate the bounds of the transformed image (with margin)
-        min_x, min_y = np.floor(np.min(transformed_corners, axis=0)).astype(int) - 1
-        max_x, max_y = np.ceil(np.max(transformed_corners, axis=0)).astype(int) + 1
-
-        # Calculate new dimensions
-        new_width = max_x - min_x
-        new_height = max_y - min_y
-
-        # Create translation matrix to keep all points in positive coordinates
-        translation_matrix = np.array(
-            [[1.0, 0.0, -min_x], [0.0, 1.0, -min_y], [0.0, 0.0, 1.0]]
-        )
-
-        # Combine with perspective matrix
-        final_transform = translation_matrix @ perspective_mat
-
-        # Apply transform with new dimensions
-        transformed_img = cv2.warpPerspective(
-            image, final_transform, (new_width, new_height)
-        )
-        transformed_mask = cv2.warpPerspective(
-            mask, final_transform, (new_width, new_height)
-        )
-
-        # Transform keypoints using the final transform
-        transformed_keypoints = []
-        for kp in keypoints:
-            # Convert to homogeneous coordinates
-            p = np.array([kp.x, kp.y, 1.0])
-            # Apply transformation
-            p_transformed = final_transform @ p
-            # Convert back from homogeneous coordinates
-            if p_transformed[2] != 0:
-                x_new, y_new = p_transformed[:2] / p_transformed[2]
-                transformed_keypoints.append(KeyPoint(x=float(x_new), y=float(y_new)))
-            else:
-                # This should rarely happen with a valid perspective matrix
-                transformed_keypoints.append(KeyPoint(x=kp.x - min_x, y=kp.y - min_y))
-
-        return transformed_img, transformed_mask, transformed_keypoints
-
     def generate_sample(self) -> SyntheticImage:
         """Generate a synthetic image with AprilTag templates."""
         # Choose random image size divisible by 64
@@ -294,6 +168,7 @@ class AprilTagDataLoader:
             mask = np.ones((template_h, template_w), dtype=np.uint8) * 255
 
             # Initial keypoints are the corners of the template
+            # Use integers to ensure exact pixel boundaries
             keypoints = [
                 KeyPoint(x=0, y=0),  # Top-left
                 KeyPoint(x=template_w - 1, y=0),  # Top-right
@@ -313,30 +188,13 @@ class AprilTagDataLoader:
                 for kp in keypoints
             ]
 
-            # Apply perspective transform to template, mask and keypoints
-            warped_template, warped_mask, warped_keypoints = (
-                self._apply_perspective_transform(
-                    scaled_template,
-                    scaled_mask,
-                    scaled_keypoints,
-                    self.perspective_transform_range,
-                )
-            )
+            # No perspective transform - keep the scaled template, mask, and keypoints
+            warped_template = scaled_template
+            warped_mask = scaled_mask
+            warped_keypoints = scaled_keypoints
 
-            # Find the bounding box of the warped keypoints
-            kp_coords = np.array([[kp.x, kp.y] for kp in warped_keypoints])
-            min_x, min_y = np.min(kp_coords, axis=0).astype(int)
-            max_x, max_y = np.max(kp_coords, axis=0).astype(int)
-
-            # Ensure the bounding box is within image bounds
-            min_x = max(0, min_x)
-            min_y = max(0, min_y)
-            max_x = min(warped_template.shape[1] - 1, max_x)
-            max_y = min(warped_template.shape[0] - 1, max_y)
-
-            # Calculate dimensions of the warped tag
-            warped_w = max_x - min_x + 1
-            warped_h = max_y - min_y + 1
+            # Get dimensions of the warped template
+            warped_h, warped_w = warped_template.shape[:2]
 
             # Check if warped template is too large for the image
             if warped_w >= img_width or warped_h >= img_height:
@@ -347,31 +205,44 @@ class AprilTagDataLoader:
             x_pos = random.randint(0, img_width - warped_w)
             y_pos = random.randint(0, img_height - warped_h)
 
-            # Crop the warped template and mask to the keypoint bounds
-            cropped_template = warped_template[min_y : max_y + 1, min_x : max_x + 1]
-            cropped_mask = warped_mask[min_y : max_y + 1, min_x : max_x + 1]
+            # Use the full template without cropping
+            cropped_template = warped_template
+            cropped_mask = warped_mask
+
+            # Since we're not cropping, there's no min_x/min_y offset
+            min_x, min_y = 0, 0
+            max_x, max_y = warped_w - 1, warped_h - 1
 
             # Check if mask has non-zero values
             if not np.any(cropped_mask):
                 print("Warning: Mask is all zeros, skipping this template")
                 continue
 
-            # Adjust keypoints for cropping and placement
+            # Adjust keypoints for placement only (no cropping)
             placed_keypoints = [
-                KeyPoint(x=kp.x - min_x + x_pos, y=kp.y - min_y + y_pos)
-                for kp in warped_keypoints
+                KeyPoint(x=kp.x + x_pos, y=kp.y + y_pos) for kp in warped_keypoints
             ]
 
             # Calculate bounding box for the placed tag
-            kp_coords = np.array([[kp.x, kp.y] for kp in placed_keypoints])
-            x_min, y_min = np.min(kp_coords, axis=0)
-            x_max, y_max = np.max(kp_coords, axis=0)
+            # For accurate bounding box, use the template dimensions rather than just keypoints
+            x_min = float(x_pos)
+            y_min = float(y_pos)
+            x_max = float(x_pos + warped_w - 1)  # -1 because it's zero-indexed
+            y_max = float(y_pos + warped_h - 1)  # -1 because it's zero-indexed
             bbox = BoundingBox(
-                x_min=float(x_min),
-                y_min=float(y_min),
-                x_max=float(x_max),
-                y_max=float(y_max),
+                x_min=x_min,
+                y_min=y_min,
+                x_max=x_max,
+                y_max=y_max,
             )
+
+            # Make sure keypoints are exactly at the corners of the placed template
+            placed_keypoints = [
+                KeyPoint(x=x_min, y=y_min),  # Top-left
+                KeyPoint(x=x_max, y=y_min),  # Top-right
+                KeyPoint(x=x_max, y=y_max),  # Bottom-right
+                KeyPoint(x=x_min, y=y_max),  # Bottom-left
+            ]
 
             # No need to convert to PIL, work directly with numpy arrays
             # Keep template as uint16 for maximum precision
@@ -468,8 +339,19 @@ class AprilTagDataLoader:
                 print("Warning: Gradient values too low, using fallback value")
 
             # Apply brightness adjustment using vectorized numpy operations
-            # This applies the brightness gradient to the template in one operation
-            adjusted_array = template_array.astype(np.float32) * gradient_normalized
+            # This applies the brightness gradient to the template additively
+            # Map gradient from 0-1 range to -brightness_variation to +brightness_variation
+            brightness_variation = self.brightness_variation_range * UINT16_MAX / 2
+            brightness_adjustment = (
+                gradient_normalized * 2.0 - 1.0
+            ) * brightness_variation
+
+            # Add the brightness adjustment (clamped to uint16 range)
+            adjusted_array = np.clip(
+                template_array.astype(np.float32) + brightness_adjustment,
+                0.0,
+                UINT16_MAX,
+            )
 
             # Convert back to uint16 for the final template
             brightness_adjusted_template = adjusted_array.astype(np.uint16)
