@@ -72,6 +72,11 @@ class AprilTagDataLoader:
         grid_cols: Tuple[int, int] = (1, 4),  # Range of grid columns
         grid_spacing: int = 10,  # Spacing between grid elements in pixels
         grid_border: int = 20,  # Border around the entire grid in pixels
+        brightness_scale_range: Tuple[float, float] = (
+            0.5,
+            2.0,
+        ),  # Range for brightness scaling
+        invert_probability: float = 0.2,  # Probability of inverting the templates
     ):  # Controls the amount of brightness variation
         """
         Initialize AprilTag data loader.
@@ -109,6 +114,12 @@ class AprilTagDataLoader:
         self.grid_cols = grid_cols
         self.grid_spacing = grid_spacing
         self.grid_border = grid_border
+
+        # Brightness scaling parameters
+        self.brightness_scale_range = brightness_scale_range
+        self.invert_probability = max(
+            0.0, min(1.0, invert_probability)
+        )  # Clamp to [0, 1]
 
         # Load template paths and class numbers
         self.template_paths, self.class_nums = self._load_templates()
@@ -527,6 +538,34 @@ class AprilTagDataLoader:
             keypoints=scaled_keypoints,
         )
 
+    def _apply_random_brightness_scaling(self, template: np.ndarray) -> np.ndarray:
+        """Apply random brightness scaling to a template, possibly inverting it.
+
+        Args:
+            template: Template image to adjust
+
+        Returns:
+            Brightness scaled template
+        """
+        # Choose a random scale factor for brightness
+        scale_factor = random.uniform(
+            self.brightness_scale_range[0], self.brightness_scale_range[1]
+        )
+
+        # Randomly decide whether to invert the template
+        invert = random.random() < self.invert_probability
+
+        if invert:
+            # Invert the template (65535 - value)
+            template = UINT16_MAX - template
+
+        # Scale the brightness
+        scaled_template = np.clip(
+            template.astype(np.float32) * scale_factor, 0.0, UINT16_MAX
+        ).astype(np.uint16)
+
+        return scaled_template
+
     def _generate_templates(self, num_templates: int) -> List[TemplateInfo]:
         """Generate multiple transformed templates.
 
@@ -766,6 +805,9 @@ class AprilTagDataLoader:
 
         # Create a grid of templates (all templates are just scaled, not transformed)
         grid_template, grid_mask, grid_annotations = self._create_template_grid()
+
+        # Apply random brightness scaling to the entire grid
+        grid_template = self._apply_random_brightness_scaling(grid_template)
 
         # Apply brightness variation to the grid before transformation
         grid_template = self._apply_brightness_variation(grid_template, grid_mask)
