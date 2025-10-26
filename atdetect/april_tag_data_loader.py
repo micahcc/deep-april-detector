@@ -11,11 +11,22 @@ import cv2
 from pathlib import Path
 from PIL import Image, ImageOps, ImageFilter, ImageDraw
 import math
+from typing import List, Tuple, Dict, Optional, NamedTuple
 
 from atdetect.bounding_box import BoundingBox
 from atdetect.key_point import KeyPoint
 from atdetect.april_tag_annotation import AprilTagAnnotation
 from atdetect.synthetic_image import SyntheticImage
+
+
+class TemplateInfo(NamedTuple):
+    """Container for template data and metadata."""
+
+    template: np.ndarray
+    mask: np.ndarray
+    class_num: int
+    keypoints: List[KeyPoint]
+
 
 # Import background generation functionality
 from atdetect.background_complexity import BackgroundComplexity
@@ -56,7 +67,11 @@ class AprilTagDataLoader:
         brightness_variation_range: float = 0.3,
         min_rotation: float = 0.0,  # Minimum rotation angle in degrees
         max_rotation: float = 360.0,  # Maximum rotation angle in degrees
-        skew_range: float = 0.1,  # Range of skew transformation (0-1)
+        skew_range: float = 0.1,  # Range of skew transformation (0-1),
+        grid_rows: Tuple[int, int] = (1, 4),  # Range of grid rows
+        grid_cols: Tuple[int, int] = (1, 4),  # Range of grid columns
+        grid_spacing: int = 10,  # Spacing between grid elements in pixels
+        grid_border: int = 20,  # Border around the entire grid in pixels
     ):  # Controls the amount of brightness variation
         """
         Initialize AprilTag data loader.
@@ -88,6 +103,12 @@ class AprilTagDataLoader:
         self.min_rotation = min_rotation
         self.max_rotation = max_rotation
         self.skew_range = max(0.0, min(1.0, skew_range))  # Clamp to [0, 1]
+
+        # Grid layout parameters
+        self.grid_rows = grid_rows
+        self.grid_cols = grid_cols
+        self.grid_spacing = grid_spacing
+        self.grid_border = grid_border
 
         # Load template paths and class numbers
         self.template_paths, self.class_nums = self._load_templates()
@@ -281,8 +302,459 @@ class AprilTagDataLoader:
 
         return final_template, final_mask, final_keypoints
 
+    def _create_template_grid(
+        self,
+    ) -> Tuple[np.ndarray, np.ndarray, List[AprilTagAnnotation]]:
+        """Create a grid of AprilTag templates.
+
+        Returns:
+            Tuple containing:
+                - Combined grid template image
+                - Combined grid mask
+                - List of annotations for each template in the grid
+        """
+        # Decide on grid dimensions, ensuring we don't exceed the number of available templates
+        num_templates = len(self.template_paths)
+
+        # First choose a random number of columns within the specified range
+        cols = random.randint(self.grid_cols[0], min(self.grid_cols[1], num_templates))
+
+        # Then choose the rows, ensuring rows * cols <= num_templates
+        max_possible_rows = (
+            num_templates // cols
+        )  # Integer division to ensure we don't exceed num_templates
+        rows = random.randint(
+            self.grid_rows[0], min(self.grid_rows[1], max_possible_rows)
+        )
+
+        # Assert that our dimensions don't exceed available templates
+        assert (
+            rows * cols <= num_templates
+        ), "Grid dimensions exceed available templates"
+
+        # Use a single scale factor for all templates in the grid for uniformity
+        scale_factor = random.uniform(self.min_scale_factor, self.max_scale_factor)
+
+        # Generate templates for the grid (all with same scale factor)
+        # Use random.sample to select unique indices without replacement
+        template_indices = random.sample(range(len(self.template_paths)), rows * cols)
+
+        # Generate a template for each selected index
+        templates_info = []
+        for idx in template_indices:
+            template_info = self._generate_template_by_index(
+                idx, scale_factor=scale_factor
+            )
+            if template_info is not None:
+                templates_info.append(template_info)
+
+        # If any templates failed to generate, we still have the assertion
+        # that will catch this case during development
+
+        # Reshape templates into grid layout
+        templates_grid = [
+            templates_info[i : i + cols] for i in range(0, len(templates_info), cols)
+        ]
+
+        # Calculate the maximum height for each row and maximum width for each column
+        row_heights = []
+        for row in templates_grid:
+            max_height = 0
+            for template_info in row:
+                max_height = max(max_height, template_info.template.shape[0])
+            row_heights.append(max_height)
+
+        col_widths = [0] * cols
+        for row in templates_grid:
+            for col_idx, template_info in enumerate(row):
+                col_widths[col_idx] = max(
+                    col_widths[col_idx], template_info.template.shape[1]
+                )
+
+        # Calculate total grid dimensions with spacing and border
+        grid_width = (
+            sum(col_widths) + self.grid_spacing * (cols - 1) + 2 * self.grid_border
+        )
+        grid_height = (
+            sum(row_heights) + self.grid_spacing * (rows - 1) + 2 * self.grid_border
+        )
+
+        # Create empty grid template and mask
+        grid_template = np.zeros((grid_height, grid_width), dtype=np.uint16)
+        grid_mask = np.zeros((grid_height, grid_width), dtype=np.uint8)
+
+        annotations = []
+
+        # Place templates in the grid
+        y_offset = self.grid_border
+        for row_idx, row in enumerate(templates_grid):
+            x_offset = self.grid_border
+            for col_idx, template_info in enumerate(row):
+                # Get template data
+                template = template_info.template
+                mask = template_info.mask
+                class_num = template_info.class_num
+                keypoints = template_info.keypoints
+
+                # Center the template in its cell
+                template_h, template_w = template.shape[:2]
+                center_y = y_offset + (row_heights[row_idx] - template_h) // 2
+                center_x = x_offset + (col_widths[col_idx] - template_w) // 2
+
+                # Place template in the grid
+                grid_template[
+                    center_y : center_y + template_h, center_x : center_x + template_w
+                ] = template
+                grid_mask[
+                    center_y : center_y + template_h, center_x : center_x + template_w
+                ] = mask
+
+                # Adjust keypoints for placement in the grid
+                placed_keypoints = [
+                    KeyPoint(x=kp.x + center_x, y=kp.y + center_y) for kp in keypoints
+                ]
+
+                # Calculate bounding box based on keypoints
+                kp_coords = np.array([[kp.x, kp.y] for kp in placed_keypoints])
+                x_min = float(np.min(kp_coords[:, 0]))
+                y_min = float(np.min(kp_coords[:, 1]))
+                x_max = float(np.max(kp_coords[:, 0]))
+                y_max = float(np.max(kp_coords[:, 1]))
+
+                bbox = BoundingBox(
+                    x_min=x_min,
+                    y_min=y_min,
+                    x_max=x_max,
+                    y_max=y_max,
+                )
+
+                # Create annotation
+                annotation = AprilTagAnnotation(
+                    class_name=self.tag_type,
+                    class_num=class_num,
+                    bbox=bbox,
+                    keypoints=placed_keypoints,
+                )
+                annotations.append(annotation)
+
+                x_offset += col_widths[col_idx] + self.grid_spacing
+
+            y_offset += row_heights[row_idx] + self.grid_spacing
+
+        return grid_template, grid_mask, annotations
+
+    def _generate_template(self, scale_factor: Optional[float] = None) -> TemplateInfo:
+        """Generate a single untransformed template.
+
+        Args:
+            scale_factor: Optional scale factor to apply. If None, a random scale
+                         factor will be chosen.
+
+        Returns:
+            TemplateInfo containing the template, mask, class number, and keypoints
+        """
+        # Choose random template
+        idx = random.randint(0, len(self.template_paths) - 1)
+        return self._generate_template_by_index(idx, scale_factor)
+
+    def _generate_template_by_index(
+        self, idx: int, scale_factor: Optional[float] = None
+    ) -> Optional[TemplateInfo]:
+        """Generate a template for a specific index.
+
+        Args:
+            idx: Index of template to use
+            scale_factor: Optional scale factor to apply. If None, a random scale
+                         factor will be chosen.
+
+        Returns:
+            TemplateInfo containing the template, mask, class number, and keypoints
+        """
+        if idx < 0 or idx >= len(self.template_paths):
+            print(f"Invalid template index: {idx}")
+            return None
+
+        template_path = self.template_paths[idx]
+        class_num = self.class_nums[idx]
+
+        # Load template and convert to 16-bit
+        template = cv2.imread(
+            str(template_path), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_GRAYSCALE
+        )
+        if template is None:
+            print(f"Failed to load template: {template_path}")
+            return None
+
+        # Make sure the template is 16-bit
+        old_range = (template.min(), template.max())
+        template = (
+            UINT16_MAX
+            * (template.astype(np.float32) - old_range[0])
+            / (old_range[1] - old_range[0])
+        ).astype(np.uint16)
+
+        template_h, template_w = template.shape[:2]
+
+        # Create a full mask for the entire template (255 for the entire tag)
+        mask = np.ones((template_h, template_w), dtype=np.uint8) * 255
+
+        # Initial keypoints are the corners of the template
+        # Use integers to ensure exact pixel boundaries
+        keypoints = [
+            KeyPoint(x=0, y=0),  # Top-left
+            KeyPoint(x=template_w - 1, y=0),  # Top-right
+            KeyPoint(x=template_w - 1, y=template_h - 1),  # Bottom-right
+            KeyPoint(x=0, y=template_h - 1),  # Bottom-left
+        ]
+
+        # Apply scaling if needed
+        if scale_factor is None:
+            # Choose random scale factor
+            scale_factor = random.uniform(self.min_scale_factor, self.max_scale_factor)
+
+        # Scale template and mask
+        scaled_template, scaled_mask = self._scale_template(
+            template, mask, scale_factor
+        )
+        scaled_keypoints = [
+            KeyPoint(x=kp.x * scale_factor, y=kp.y * scale_factor) for kp in keypoints
+        ]
+
+        return TemplateInfo(
+            template=scaled_template,
+            mask=scaled_mask,
+            class_num=class_num,
+            keypoints=scaled_keypoints,
+        )
+
+    def _generate_templates(self, num_templates: int) -> List[TemplateInfo]:
+        """Generate multiple transformed templates.
+
+        Args:
+            num_templates: Number of templates to generate
+
+        Returns:
+            List of TemplateInfo objects
+        """
+        templates = []
+        for _ in range(num_templates):
+            template_info = self._generate_template()
+            if template_info is not None:
+                templates.append(template_info)
+
+        return templates
+
+    def _apply_brightness_variation(
+        self, template: np.ndarray, mask: np.ndarray
+    ) -> np.ndarray:
+        """Apply brightness variation to a template.
+
+        Args:
+            template: Template image to adjust
+            mask: Mask for the template
+
+        Returns:
+            Brightness adjusted template
+        """
+        h, w = template.shape[:2]
+
+        # Choose between linear or radial gradient for brightness
+        gradient_type = random.choice(list(GradientType))
+
+        # Create a brightness gradient map as a grayscale image
+        gradient_map = Image.new("I", (w, h))
+        gradient_draw = ImageDraw.Draw(gradient_map)
+
+        # Random brightness gradient range from -variation to +variation
+        min_brightness = 1.0 - self.brightness_variation_range
+        max_brightness = 1.0 + self.brightness_variation_range
+
+        if gradient_type == GradientType.LINEAR:
+            # Choose gradient direction
+            direction = random.choice(list(Direction))
+
+            if direction == Direction.HORIZONTAL:
+                for i in range(w):
+                    ratio = i / max(1, w - 1)
+                    brightness = int(
+                        (min_brightness + (max_brightness - min_brightness) * ratio)
+                        * 65535
+                    )
+                    gradient_draw.line([(i, 0), (i, h - 1)], fill=brightness)
+            elif direction == Direction.VERTICAL:
+                for i in range(h):
+                    ratio = i / max(1, h - 1)
+                    brightness = int(
+                        (min_brightness + (max_brightness - min_brightness) * ratio)
+                        * 65535
+                    )
+                    gradient_draw.line([(0, i), (w - 1, i)], fill=brightness)
+            elif direction == Direction.DIAGONAL:
+                # Create custom diagonal gradient
+                for i in range(h):
+                    for j in range(w):
+                        # Calculate diagonal ratio
+                        ratio = (i / max(1, h - 1) + j / max(1, w - 1)) / 2
+                        brightness = int(
+                            (min_brightness + (max_brightness - min_brightness) * ratio)
+                            * 65535
+                        )
+                        gradient_draw.point((j, i), fill=brightness)
+        elif gradient_type == GradientType.RADIAL:
+            # Choose center point for radial gradient
+            center_x = random.randint(0, w - 1)
+            center_y = random.randint(0, h - 1)
+
+            # Randomly choose between bright center or dark center
+            bright_center = random.choice([True, False])
+            inner_brightness = max_brightness if bright_center else min_brightness
+            outer_brightness = min_brightness if bright_center else max_brightness
+
+            # Create custom radial gradient
+            max_dist = math.sqrt(w**2 + h**2) / 2
+            for i in range(h):
+                for j in range(w):
+                    # Calculate distance from center
+                    dist = math.sqrt((j - center_x) ** 2 + (i - center_y) ** 2)
+                    ratio = min(1.0, dist / max_dist)
+                    brightness = int(
+                        (inner_brightness * (1 - ratio) + outer_brightness * ratio)
+                        * 65535
+                    )
+                    gradient_draw.point((j, i), fill=brightness)
+
+        # Convert gradient to numpy and resize to match template dimensions
+        gradient_array = np.array(gradient_map).astype(np.float32)
+
+        # Resize gradient to match template dimensions
+        template_shape = template.shape
+        gradient_resized = cv2.resize(
+            gradient_array,
+            (template_shape[1], template_shape[0]),
+            interpolation=cv2.INTER_LINEAR,
+        )
+
+        # Normalize gradient to 0-1 range
+        gradient_normalized = gradient_resized / 65535.0
+
+        # Ensure gradient doesn't have all near-zero values
+        if np.mean(gradient_normalized) < 0.01:
+            # Fallback to a reasonable brightness value
+            gradient_normalized = np.ones_like(gradient_normalized) * 0.5
+            print("Warning: Gradient values too low, using fallback value")
+
+        # Apply brightness adjustment using vectorized numpy operations
+        # Map gradient from 0-1 range to -brightness_variation to +brightness_variation
+        brightness_variation = self.brightness_variation_range * UINT16_MAX / 2
+        brightness_adjustment = (gradient_normalized * 2.0 - 1.0) * brightness_variation
+
+        # Add the brightness adjustment (clamped to uint16 range)
+        adjusted_array = np.clip(
+            template.astype(np.float32) + brightness_adjustment,
+            0.0,
+            UINT16_MAX,
+        )
+
+        # Convert back to uint16 for the final template
+        return adjusted_array.astype(np.uint16)
+
+    def _transform_grid(
+        self,
+        grid_template: np.ndarray,
+        grid_mask: np.ndarray,
+        annotations: List[AprilTagAnnotation],
+    ) -> Tuple[np.ndarray, np.ndarray, List[AprilTagAnnotation]]:
+        """Apply rotation and skew to the entire grid.
+
+        Args:
+            grid_template: Grid template image
+            grid_mask: Grid mask
+            annotations: List of annotations for templates in the grid
+
+        Returns:
+            Tuple of transformed grid, mask, and updated annotations
+        """
+        # Get dimensions of the grid
+        h, w = grid_template.shape[:2]
+        center = (w // 2, h // 2)  # Center of the grid
+
+        # Choose a random rotation angle
+        rotation_angle = random.uniform(self.min_rotation, self.max_rotation)
+
+        # Get rotation matrix
+        rotation_matrix = cv2.getRotationMatrix2D(
+            center, -rotation_angle, 1.0
+        )  # Negative angle for clockwise rotation
+
+        # Calculate new dimensions after rotation
+        angle_rad = math.radians(rotation_angle)
+        cos_angle = abs(math.cos(angle_rad))
+        sin_angle = abs(math.sin(angle_rad))
+
+        # Calculate new dimensions for rotation
+        new_w = int(w * cos_angle + h * sin_angle)
+        new_h = int(w * sin_angle + h * cos_angle)
+
+        # Adjust rotation matrix to account for new dimensions
+        rotation_matrix[0, 2] += (new_w - w) // 2
+        rotation_matrix[1, 2] += (new_h - h) // 2
+
+        # Apply rotation to grid template and mask
+        rotated_template = cv2.warpAffine(
+            grid_template,
+            rotation_matrix,
+            (new_w, new_h),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+        )
+        rotated_mask = cv2.warpAffine(
+            grid_mask,
+            rotation_matrix,
+            (new_w, new_h),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+        )
+
+        # Update annotations with rotated keypoints
+        rotated_annotations = []
+        for annotation in annotations:
+            # Rotate keypoints
+            rotated_keypoints = []
+            for kp in annotation.keypoints:
+                # Apply rotation matrix
+                kp_matrix = np.array([kp.x, kp.y, 1.0])
+                rotated_x, rotated_y = rotation_matrix @ kp_matrix
+                rotated_keypoints.append(
+                    KeyPoint(x=float(rotated_x), y=float(rotated_y))
+                )
+
+            # Calculate new bounding box from rotated keypoints
+            kp_coords = np.array([[kp.x, kp.y] for kp in rotated_keypoints])
+            x_min = float(np.min(kp_coords[:, 0]))
+            y_min = float(np.min(kp_coords[:, 1]))
+            x_max = float(np.max(kp_coords[:, 0]))
+            y_max = float(np.max(kp_coords[:, 1]))
+
+            new_bbox = BoundingBox(
+                x_min=x_min,
+                y_min=y_min,
+                x_max=x_max,
+                y_max=y_max,
+            )
+
+            # Create updated annotation
+            rotated_annotation = AprilTagAnnotation(
+                class_name=annotation.class_name,
+                class_num=annotation.class_num,
+                bbox=new_bbox,
+                keypoints=rotated_keypoints,
+            )
+            rotated_annotations.append(rotated_annotation)
+
+        return rotated_template, rotated_mask, rotated_annotations
+
     def generate_sample(self) -> SyntheticImage:
-        """Generate a synthetic image with AprilTag templates."""
+        """Generate a synthetic image with AprilTag templates arranged in a grid."""
         # Choose random image size divisible by 64
         min_img_size = max(1, self.min_img_size)
         max_img_size = max(1, self.max_img_size)
@@ -292,261 +764,110 @@ class AprilTagDataLoader:
         # Create interesting background image (16-bit)
         image = self._generate_background(img_height, img_width)
 
-        # Decide how many tags to place
-        num_tags = random.randint(self.tags_per_image[0], self.tags_per_image[1])
+        # Create a grid of templates (all templates are just scaled, not transformed)
+        grid_template, grid_mask, grid_annotations = self._create_template_grid()
 
-        annotations = []
+        # Apply brightness variation to the grid before transformation
+        grid_template = self._apply_brightness_variation(grid_template, grid_mask)
 
-        # Generate and place tags
-        for _ in range(num_tags):
-            # Choose random template
-            idx = random.randint(0, len(self.template_paths) - 1)
-            template_path = self.template_paths[idx]
-            class_num = self.class_nums[idx]
+        # Apply transformations (rotation and skew) to the entire grid as a single unit
+        transformed_grid, transformed_mask, transformed_annotations = (
+            self._transform_grid(grid_template, grid_mask, grid_annotations)
+        )
 
-            # Load template and convert to 16-bit
-            template = cv2.imread(
-                str(template_path), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_GRAYSCALE
-            )
-            if template is None:
-                print(f"Failed to load template: {template_path}")
-                continue
+        # Get dimensions of the transformed grid
+        grid_h, grid_w = transformed_grid.shape[:2]
 
-            # Make sure the template is 16-bit
-            old_range = (template.min(), template.max())
-            template = (
-                UINT16_MAX
-                * (template.astype(np.float32) - old_range[0])
-                / (old_range[1] - old_range[0])
-            ).astype(np.uint16)
+        # Choose random position for the grid in the final image
+        # Allow grid to be partially off-screen
+        x_pos = random.randint(-grid_w // 2, img_width - grid_w // 2)
+        y_pos = random.randint(-grid_h // 2, img_height - grid_h // 2)
 
-            template_h, template_w = template.shape[:2]
+        # Calculate intersection of grid and image
+        x_start_img = max(0, x_pos)
+        y_start_img = max(0, y_pos)
+        x_end_img = min(img_width, x_pos + grid_w)
+        y_end_img = min(img_height, y_pos + grid_h)
 
-            # Create a full mask for the entire template (255 for the entire tag)
-            mask = np.ones((template_h, template_w), dtype=np.uint8) * 255
+        # Calculate corresponding positions in grid
+        x_start_grid = max(0, -x_pos)
+        y_start_grid = max(0, -y_pos)
+        x_end_grid = grid_w - max(0, (x_pos + grid_w) - img_width)
+        y_end_grid = grid_h - max(0, (y_pos + grid_h) - img_height)
 
-            # Initial keypoints are the corners of the template
-            # Use integers to ensure exact pixel boundaries
-            keypoints = [
-                KeyPoint(x=0, y=0),  # Top-left
-                KeyPoint(x=template_w - 1, y=0),  # Top-right
-                KeyPoint(x=template_w - 1, y=template_h - 1),  # Bottom-right
-                KeyPoint(x=0, y=template_h - 1),  # Bottom-left
+        # Only place the visible portion of the grid
+        if x_end_img > x_start_img and y_end_img > y_start_img:
+            # Extract visible region of mask
+            visible_mask = transformed_mask[
+                y_start_grid:y_end_grid, x_start_grid:x_end_grid
+            ]
+            binary_mask = visible_mask > 0
+
+            # Extract visible region of grid
+            visible_grid = transformed_grid[
+                y_start_grid:y_end_grid, x_start_grid:x_end_grid
             ]
 
-            # Choose random scale factor
-            scale_factor = random.uniform(self.min_scale_factor, self.max_scale_factor)
+            # Place the visible part of the grid on the image
+            roi = image[y_start_img:y_end_img, x_start_img:x_end_img]
+            roi[binary_mask] = visible_grid[binary_mask]
 
-            # Scale template and mask
-            scaled_template, scaled_mask = self._scale_template(
-                template, mask, scale_factor
-            )
-            scaled_keypoints = [
-                KeyPoint(x=kp.x * scale_factor, y=kp.y * scale_factor)
-                for kp in keypoints
+        # Adjust annotations for placement in the final image
+        final_annotations = []
+        for annotation in transformed_annotations:
+            # Adjust keypoints
+            placed_keypoints = [
+                KeyPoint(x=kp.x + x_pos, y=kp.y + y_pos) for kp in annotation.keypoints
             ]
 
-            # Choose a random rotation angle
-            rotation_angle = random.uniform(self.min_rotation, self.max_rotation)
+            # Adjust bounding box
+            bbox = annotation.bbox
+            placed_bbox = BoundingBox(
+                x_min=bbox.x_min + x_pos,
+                y_min=bbox.y_min + y_pos,
+                x_max=bbox.x_max + x_pos,
+                y_max=bbox.y_max + y_pos,
+            )
 
-            # Apply transforms (rotation and skew) to the scaled template, mask, and keypoints
-            transformed_template, transformed_mask, transformed_keypoints = (
-                self._transform_template(
-                    scaled_template,
-                    scaled_mask,
-                    scaled_keypoints,
-                    rotation_angle,
-                    self.skew_range,
+            # Check if the annotation is at least partially visible in the image
+            if (
+                placed_bbox.x_max > 0
+                and placed_bbox.x_min < img_width
+                and placed_bbox.y_max > 0
+                and placed_bbox.y_min < img_height
+            ):
+
+                # Clip bounding box to image boundaries if necessary
+                clipped_bbox = BoundingBox(
+                    x_min=max(0, placed_bbox.x_min),
+                    y_min=max(0, placed_bbox.y_min),
+                    x_max=min(img_width, placed_bbox.x_max),
+                    y_max=min(img_height, placed_bbox.y_max),
                 )
-            )
 
-            # Use the transformed template, mask, and keypoints
-            warped_template = transformed_template
-            warped_mask = transformed_mask
-            warped_keypoints = transformed_keypoints
+                # Filter keypoints to only include those visible in the image
+                visible_keypoints = [
+                    kp
+                    for kp in placed_keypoints
+                    if 0 <= kp.x < img_width and 0 <= kp.y < img_height
+                ]
 
-            # Get dimensions of the warped template
-            warped_h, warped_w = warped_template.shape[:2]
-
-            # Check if warped template is too large for the image
-            if warped_w >= img_width or warped_h >= img_height:
-                continue
-
-            # Choose random position for the tag in the final image
-            # Allow it to be placed anywhere in the image
-            x_pos = random.randint(0, img_width - warped_w)
-            y_pos = random.randint(0, img_height - warped_h)
-
-            # Use the full template without cropping
-            cropped_template = warped_template
-            cropped_mask = warped_mask
-
-            # Since we're not cropping, there's no min_x/min_y offset
-            min_x, min_y = 0, 0
-            max_x, max_y = warped_w - 1, warped_h - 1
-
-            # Check if mask has non-zero values
-            if not np.any(cropped_mask):
-                print("Warning: Mask is all zeros, skipping this template")
-                continue
-
-            # Adjust keypoints for placement only (no cropping)
-            placed_keypoints = [
-                KeyPoint(x=kp.x + x_pos, y=kp.y + y_pos) for kp in warped_keypoints
-            ]
-
-            # Calculate bounding box for the placed tag based on the rotated keypoints
-            # Since we've rotated the template, we need to use the keypoints to determine the bounding box
-            kp_coords = np.array(
-                [[kp.x + x_pos, kp.y + y_pos] for kp in warped_keypoints]
-            )
-            x_min = float(np.min(kp_coords[:, 0]))
-            y_min = float(np.min(kp_coords[:, 1]))
-            x_max = float(np.max(kp_coords[:, 0]))
-            y_max = float(np.max(kp_coords[:, 1]))
-
-            bbox = BoundingBox(
-                x_min=x_min,
-                y_min=y_min,
-                x_max=x_max,
-                y_max=y_max,
-            )
-
-            # Use the rotated keypoints for placement in the final image
-            placed_keypoints = [
-                KeyPoint(x=kp.x + x_pos, y=kp.y + y_pos) for kp in warped_keypoints
-            ]
-
-            # No need to convert to PIL, work directly with numpy arrays
-            # Keep template as uint16 for maximum precision
-            template_array = cropped_template
-
-            # Choose between linear or radial gradient for brightness
-            gradient_type = random.choice(list(GradientType))
-
-            # Create a brightness gradient map as a grayscale image
-            gradient_map = Image.new("I", (warped_w, warped_h))
-            gradient_draw = ImageDraw.Draw(gradient_map)
-
-            # Random brightness gradient range from -variation to +variation
-            min_brightness = 1.0 - self.brightness_variation_range
-            max_brightness = 1.0 + self.brightness_variation_range
-
-            if gradient_type == GradientType.LINEAR:
-                # Choose gradient direction
-                direction = random.choice(list(Direction))
-
-                if direction == Direction.HORIZONTAL:
-                    for i in range(warped_w):
-                        ratio = i / max(1, warped_w - 1)
-                        brightness = int(
-                            (min_brightness + (max_brightness - min_brightness) * ratio)
-                            * 65535
-                        )
-                        gradient_draw.line([(i, 0), (i, warped_h - 1)], fill=brightness)
-                elif direction == Direction.VERTICAL:
-                    for i in range(warped_h):
-                        ratio = i / max(1, warped_h - 1)
-                        brightness = int(
-                            (min_brightness + (max_brightness - min_brightness) * ratio)
-                            * 65535
-                        )
-                        gradient_draw.line([(0, i), (warped_w - 1, i)], fill=brightness)
-                elif direction == Direction.DIAGONAL:
-                    # Create custom diagonal gradient
-                    for i in range(warped_h):
-                        for j in range(warped_w):
-                            # Calculate diagonal ratio
-                            ratio = (
-                                i / max(1, warped_h - 1) + j / max(1, warped_w - 1)
-                            ) / 2
-                            brightness = int(
-                                (
-                                    min_brightness
-                                    + (max_brightness - min_brightness) * ratio
-                                )
-                                * 65535
-                            )
-                            gradient_draw.point((j, i), fill=brightness)
-            elif gradient_type == GradientType.RADIAL:
-                # Choose center point for radial gradient
-                center_x = random.randint(0, warped_w - 1)
-                center_y = random.randint(0, warped_h - 1)
-
-                # Randomly choose between bright center or dark center
-                bright_center = random.choice([True, False])
-                inner_brightness = max_brightness if bright_center else min_brightness
-                outer_brightness = min_brightness if bright_center else max_brightness
-
-                # Create custom radial gradient
-                max_dist = math.sqrt(warped_w**2 + warped_h**2) / 2
-                for i in range(warped_h):
-                    for j in range(warped_w):
-                        # Calculate distance from center
-                        dist = math.sqrt((j - center_x) ** 2 + (i - center_y) ** 2)
-                        ratio = min(1.0, dist / max_dist)
-                        brightness = int(
-                            (inner_brightness * (1 - ratio) + outer_brightness * ratio)
-                            * 65535
-                        )
-                        gradient_draw.point((j, i), fill=brightness)
-
-            # Convert gradient to numpy and resize to match template dimensions
-            gradient_array = np.array(gradient_map).astype(np.float32)
-
-            # Resize gradient to match template dimensions
-            template_shape = template_array.shape
-            gradient_resized = cv2.resize(
-                gradient_array,
-                (template_shape[1], template_shape[0]),
-                interpolation=cv2.INTER_LINEAR,
-            )
-
-            # Normalize gradient to 0-1 range
-            gradient_normalized = gradient_resized / 65535.0
-
-            # Ensure gradient doesn't have all near-zero values
-            if np.mean(gradient_normalized) < 0.01:
-                # Fallback to a reasonable brightness value
-                gradient_normalized = np.ones_like(gradient_normalized) * 0.5
-                print("Warning: Gradient values too low, using fallback value")
-
-            # Apply brightness adjustment using vectorized numpy operations
-            # This applies the brightness gradient to the template additively
-            # Map gradient from 0-1 range to -brightness_variation to +brightness_variation
-            brightness_variation = self.brightness_variation_range * UINT16_MAX / 2
-            brightness_adjustment = (
-                gradient_normalized * 2.0 - 1.0
-            ) * brightness_variation
-
-            # Add the brightness adjustment (clamped to uint16 range)
-            adjusted_array = np.clip(
-                template_array.astype(np.float32) + brightness_adjustment,
-                0.0,
-                UINT16_MAX,
-            )
-
-            # Convert back to uint16 for the final template
-            brightness_adjusted_template = adjusted_array.astype(np.uint16)
-
-            # Place the tag on the image using the mask
-            roi = image[y_pos : y_pos + warped_h, x_pos : x_pos + warped_w]
-            # Convert mask to binary (0 or 1)
-            binary_mask = cropped_mask > 0
-            # Apply mask to place the tag
-            roi[binary_mask] = brightness_adjusted_template[binary_mask]
-
-            # Create annotation
-            annotation = AprilTagAnnotation(
-                class_name=self.tag_type,
-                class_num=class_num,
-                bbox=bbox,
-                keypoints=placed_keypoints,
-            )
-            annotations.append(annotation)
+                # Only include the annotation if we have at least some keypoints visible
+                if visible_keypoints:
+                    # Create new annotation with clipped bbox and visible keypoints
+                    placed_annotation = AprilTagAnnotation(
+                        class_name=annotation.class_name,
+                        class_num=annotation.class_num,
+                        bbox=clipped_bbox,
+                        keypoints=visible_keypoints,
+                    )
+                    final_annotations.append(placed_annotation)
 
         return SyntheticImage(
-            image=image, annotations=annotations, height=img_height, width=img_width
+            image=image,
+            annotations=final_annotations,
+            height=img_height,
+            width=img_width,
         )
 
     def __iter__(self):
