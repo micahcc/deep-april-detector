@@ -1,6 +1,7 @@
 """
 Data loader for AprilTag templates.
 """
+
 import os
 import random
 import numpy as np
@@ -157,7 +158,8 @@ class AprilTagDataLoader:
 
         # Create skew matrix
         skew_matrix = np.array(
-            [[1.0, skew_x, 0], [skew_y, 1.0, 0], [0, 0, 1.0]], dtype=np.float32
+            [[1.0 - skew_x, skew_x, 0], [skew_y, 1.0 - skew_y, 0], [0, 0, 1.0]],
+            dtype=np.float32,
         )
 
         # Combine transforms
@@ -185,23 +187,65 @@ class AprilTagDataLoader:
             h, w, perspective_range
         )
 
-        # Apply transform to image and mask
-        transformed_img = cv2.warpPerspective(image, perspective_mat, (w, h))
-        transformed_mask = cv2.warpPerspective(mask, perspective_mat, (w, h))
+        # Calculate the bounds needed for the transformed image by transforming corners
+        corners = np.array(
+            [
+                [0, 0, 1.0],  # Top-left
+                [w - 1, 0, 1.0],  # Top-right
+                [w - 1, h - 1, 1.0],  # Bottom-right
+                [0, h - 1, 1.0],  # Bottom-left
+            ]
+        )
 
-        # Transform keypoints
+        # Apply perspective transform to corners
+        transformed_corners = []
+        for corner in corners:
+            p_transformed = perspective_mat @ corner
+            # Convert from homogeneous coordinates
+            assert p_transformed[2] != 0, "Invalid perspective"
+            x_new, y_new = p_transformed[:2] / p_transformed[2]
+            transformed_corners.append([x_new, y_new])
+
+        transformed_corners = np.array(transformed_corners)
+
+        # Calculate the bounds of the transformed image (with margin)
+        min_x, min_y = np.floor(np.min(transformed_corners, axis=0)).astype(int) - 1
+        max_x, max_y = np.ceil(np.max(transformed_corners, axis=0)).astype(int) + 1
+
+        # Calculate new dimensions
+        new_width = max_x - min_x
+        new_height = max_y - min_y
+
+        # Create translation matrix to keep all points in positive coordinates
+        translation_matrix = np.array(
+            [[1.0, 0.0, -min_x], [0.0, 1.0, -min_y], [0.0, 0.0, 1.0]]
+        )
+
+        # Combine with perspective matrix
+        final_transform = translation_matrix @ perspective_mat
+
+        # Apply transform with new dimensions
+        transformed_img = cv2.warpPerspective(
+            image, final_transform, (new_width, new_height)
+        )
+        transformed_mask = cv2.warpPerspective(
+            mask, final_transform, (new_width, new_height)
+        )
+
+        # Transform keypoints using the final transform
         transformed_keypoints = []
         for kp in keypoints:
             # Convert to homogeneous coordinates
             p = np.array([kp.x, kp.y, 1.0])
             # Apply transformation
-            p_transformed = perspective_mat @ p
+            p_transformed = final_transform @ p
             # Convert back from homogeneous coordinates
             if p_transformed[2] != 0:
                 x_new, y_new = p_transformed[:2] / p_transformed[2]
                 transformed_keypoints.append(KeyPoint(x=float(x_new), y=float(y_new)))
             else:
-                transformed_keypoints.append(KeyPoint(x=kp.x, y=kp.y))
+                # This should rarely happen with a valid perspective matrix
+                transformed_keypoints.append(KeyPoint(x=kp.x - min_x, y=kp.y - min_y))
 
         return transformed_img, transformed_mask, transformed_keypoints
 
@@ -307,6 +351,11 @@ class AprilTagDataLoader:
             cropped_template = warped_template[min_y : max_y + 1, min_x : max_x + 1]
             cropped_mask = warped_mask[min_y : max_y + 1, min_x : max_x + 1]
 
+            # Check if mask has non-zero values
+            if not np.any(cropped_mask):
+                print("Warning: Mask is all zeros, skipping this template")
+                continue
+
             # Adjust keypoints for cropping and placement
             placed_keypoints = [
                 KeyPoint(x=kp.x - min_x + x_pos, y=kp.y - min_y + y_pos)
@@ -360,12 +409,21 @@ class AprilTagDataLoader:
                         )
                         gradient_draw.line([(0, i), (warped_w - 1, i)], fill=brightness)
                 elif direction == Direction.DIAGONAL:
-                    # Draw gradient corners with proper brightness values
-                    gradient_draw.rectangle(
-                        [(0, 0), (warped_w - 1, warped_h - 1)],
-                        fill=int(min_brightness * 65535),
-                    )
-                    gradient_map = Image.linear_gradient("I")
+                    # Create custom diagonal gradient
+                    for i in range(warped_h):
+                        for j in range(warped_w):
+                            # Calculate diagonal ratio
+                            ratio = (
+                                i / max(1, warped_h - 1) + j / max(1, warped_w - 1)
+                            ) / 2
+                            brightness = int(
+                                (
+                                    min_brightness
+                                    + (max_brightness - min_brightness) * ratio
+                                )
+                                * 65535
+                            )
+                            gradient_draw.point((j, i), fill=brightness)
             elif gradient_type == GradientType.RADIAL:
                 # Choose center point for radial gradient
                 center_x = random.randint(0, warped_w - 1)
@@ -376,8 +434,18 @@ class AprilTagDataLoader:
                 inner_brightness = max_brightness if bright_center else min_brightness
                 outer_brightness = min_brightness if bright_center else max_brightness
 
-                # Create radial gradient
-                gradient_map = Image.radial_gradient("I")
+                # Create custom radial gradient
+                max_dist = math.sqrt(warped_w**2 + warped_h**2) / 2
+                for i in range(warped_h):
+                    for j in range(warped_w):
+                        # Calculate distance from center
+                        dist = math.sqrt((j - center_x) ** 2 + (i - center_y) ** 2)
+                        ratio = min(1.0, dist / max_dist)
+                        brightness = int(
+                            (inner_brightness * (1 - ratio) + outer_brightness * ratio)
+                            * 65535
+                        )
+                        gradient_draw.point((j, i), fill=brightness)
 
             # Convert gradient to numpy and resize to match template dimensions
             gradient_array = np.array(gradient_map).astype(np.float32)
@@ -392,6 +460,12 @@ class AprilTagDataLoader:
 
             # Normalize gradient to 0-1 range
             gradient_normalized = gradient_resized / 65535.0
+
+            # Ensure gradient doesn't have all near-zero values
+            if np.mean(gradient_normalized) < 0.01:
+                # Fallback to a reasonable brightness value
+                gradient_normalized = np.ones_like(gradient_normalized) * 0.5
+                print("Warning: Gradient values too low, using fallback value")
 
             # Apply brightness adjustment using vectorized numpy operations
             # This applies the brightness gradient to the template in one operation

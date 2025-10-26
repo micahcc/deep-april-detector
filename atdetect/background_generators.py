@@ -212,9 +212,6 @@ def create_perlin_noise_background(
     base_height = height // scale + 1
     base_width = width // scale + 1
     base = np.random.randint(color_range[0], color_range[1], (base_height, base_width))
-    import ipdb
-
-    ipdb.set_trace()
 
     # Resize to full size using bilinear interpolation
     scaled = cv2.resize(base, (width, height), interpolation=cv2.INTER_LINEAR)
