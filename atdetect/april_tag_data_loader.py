@@ -1022,6 +1022,9 @@ class AprilTagDataLoader:
 
         return background
 
-    def __call__(self, batch_size: int = 1) -> List[SyntheticImage]:
+    def __getitem__(self, idx) -> List[SyntheticImage]:
         """Generate a batch of synthetic images."""
-        return [self.generate_sample() for _ in range(batch_size)]
+        return self.generate_sample()
+
+    def __len__(self) -> int:
+        return 10000

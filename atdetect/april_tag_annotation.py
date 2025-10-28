@@ -1,10 +1,12 @@
 """
 Annotation class for AprilTag detections.
 """
+
 from dataclasses import dataclass
 from typing import List
 from atdetect.bounding_box import BoundingBox
 from atdetect.key_point import KeyPoint
+
 
 @dataclass
 class AprilTagAnnotation:
