@@ -506,15 +506,10 @@ def apply_mandelbrot_effect(
 
     # Create Mandelbrot effect
     try:
-        effect_img = pil_image.effect_mandelbrot(
-            (
-                random.uniform(-2.0, 0.5),
-                random.uniform(-1.5, 1.5),
-                random.uniform(-1.0, 2.0),
-                random.uniform(-1.5, 1.5),
-            ),
-            width,
-            random.randint(100, 500),
+        effect_img = Image.effect_mandelbrot(
+            (width, height),  # size parameter
+            (0, 0, width, height),  # extent parameter
+            random.randint(100, 500),  # quality parameter
         )
 
         # Blend with original
@@ -558,7 +553,7 @@ def apply_noise_effect(
 
     try:
         # Apply noise effect
-        noise_img = pil_image.effect_noise((width, height), noise_size)
+        noise_img = Image.effect_noise((width, height), float(noise_size))
 
         # Blend with original
         blended = Image.blend(pil_image, noise_img, blend_factor)

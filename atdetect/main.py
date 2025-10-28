@@ -6,6 +6,11 @@ import os
 import numpy as np
 import cv2
 
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.utils.data import DataLoader, DistributedSampler
+
 # Import configuration classes
 from atdetect.train_config import TrainConfig
 from atdetect.eval_config import EvalConfig
@@ -14,6 +19,8 @@ from atdetect.export_config import ExportConfig
 # Import data loader components
 from atdetect.background_complexity import BackgroundComplexity
 from atdetect.april_tag_data_loader import AprilTagDataLoader
+from atdetect.models.detector import AprilTagDetector
+from atdetect.trainer import Trainer
 
 
 def load_config(config_path: str, config_class):
@@ -54,10 +61,10 @@ def load_config(config_path: str, config_class):
         sys.exit(1)
 
 
-def train(args):
-    """Handle the train subcommand."""
+def make_examples(args):
+    """Handle the make-examples subcommand for generating synthetic tag examples."""
     config = load_config(args.config, TrainConfig)
-    print(f"Training model on {config.tag_type} tag templates")
+    print(f"Generating examples of {config.tag_type} tags")
     print(
         f"Model: {config.model_name}, Learning rate: {config.learning_rate}, Batch size: {config.batch_size}"
     )
@@ -137,8 +144,6 @@ def train(args):
         f"Images use min-max scaling per channel for optimal visualization of 16-bit data."
     )
 
-    # TODO: Implement actual training logic using template images for the specified tag type
-
 
 def evaluate(args):
     """Handle the eval subcommand."""
@@ -160,6 +165,198 @@ def export(args):
     # TODO: Implement actual export logic
 
 
+def setup_logging():
+    """Set up logging configuration."""
+    import logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[logging.StreamHandler(stream=sys.stdout)],
+    )
+
+
+def get_num_classes_from_tag_type(tag_type: str) -> int:
+    """Get the number of classes based on the tag type."""
+    # Map tag types to their class counts
+    # In AprilTag detection, each tag ID is treated as a separate class
+    tag_type_to_classes = {
+        "tag16h5": 30,  # 16h5 has 30 possible tag IDs (0-29)
+        "tagCircle21h7": 35,  # tagCircle21h7 has 35 possible tag IDs (0-34)
+        "tagStandard41h12": 587,  # tagStandard41h12 has 587 possible tag IDs (0-586)
+    }
+
+    if tag_type not in tag_type_to_classes:
+        raise ValueError(f"Unknown tag type: {tag_type}")
+
+    # Add one for background class (0 = background, 1+ = tag IDs)
+    return tag_type_to_classes[tag_type] + 1
+
+
+def setup_distributed(rank: int, world_size: int):
+    """Initialize the distributed environment."""
+    # Set up environment variables for PyTorch distributed
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12355"
+
+    # Initialize process group
+    dist.init_process_group(
+        backend="nccl",  # Use NCCL backend for GPU training
+        world_size=world_size,
+        rank=rank,
+    )
+
+
+def cleanup_distributed():
+    """Clean up the distributed environment."""
+    dist.destroy_process_group()
+
+
+def train_worker(rank: int, world_size: int, config: TrainConfig, distributed: bool):
+    """Worker function for training process."""
+    if distributed:
+        # Initialize the process group
+        setup_distributed(rank, world_size)
+
+    # Set up device
+    device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
+
+    # Get number of classes from tag type
+    num_classes = get_num_classes_from_tag_type(config.tag_type)
+
+    # Create model
+    model = AprilTagDetector(
+        input_channels=1,  # Default to 1 for mono16 images
+        fpn_channels=256,  # Default FPN channels
+        num_classes=num_classes,
+    )
+
+    # Create datasets
+    # Use standard data directory structure
+    data_dir = os.path.join("data")
+    train_dir = os.path.join(data_dir, "train")
+
+    # Ensure train directory exists
+    if not os.path.exists(train_dir):
+        os.makedirs(train_dir, exist_ok=True)
+        import logging
+        logging.warning(f"Created train directory: {train_dir}")
+
+    train_dataset = AprilTagDataLoader(
+        config.tag_type
+    )
+    
+    val_dataset = None
+    if config.val_split > 0:
+        val_dir = os.path.join(data_dir, "val")
+        # Only create validation dataset if directory exists
+        if os.path.exists(val_dir):
+            val_dataset = AprilTagDataLoader(
+                config.tag_type,
+                templates_dir=val_dir
+            )
+        else:
+            import logging
+            logging.warning(
+                "Validation split %.2f specified but no validation directory found at %s", 
+                config.val_split, val_dir
+            )
+
+    # Create data loaders
+    train_sampler = DistributedSampler(train_dataset) if distributed else None
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config.batch_size,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
+        num_workers=4,  # Default to 4 workers
+        pin_memory=True,
+        drop_last=True,
+    )
+
+    val_loader = None
+    if val_dataset is not None:
+        val_sampler = DistributedSampler(val_dataset) if distributed else None
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=config.batch_size,
+            shuffle=False,
+            sampler=val_sampler,
+            num_workers=4,  # Default to 4 workers
+            pin_memory=True,
+        )
+
+    # Only rank 0 process should log
+    if rank == 0 or not distributed:
+        import logging
+        logging.info("Training on %i GPUs", torch.cuda.device_count())
+        logging.info("Total batch size: %i", config.batch_size * world_size)
+
+    # Create trainer
+    trainer = Trainer(
+        model=model,
+        train_dataloader=train_loader,
+        val_dataloader=val_loader,
+        device=device,
+        learning_rate=config.learning_rate,
+        weight_decay=0.0001,  # Default weight decay
+        num_epochs=config.epochs,
+        log_interval=10,  # Default log interval
+        save_interval=5,  # Default save interval
+        checkpoint_dir=config.checkpoint_dir or "output/checkpoints",
+        distributed=distributed,
+        rank=rank,
+        world_size=world_size,
+        eval_interval=5,  # Default eval interval
+    )
+
+    # Run training
+    trainer.train()
+
+    # Clean up
+    if distributed:
+        cleanup_distributed()
+
+
+def train(args):
+    """Handle the train subcommand."""
+    config = load_config(args.config, TrainConfig)
+    print(f"Training model on {config.tag_type} tag templates")
+    print(
+        f"Model: {config.model_name}, Learning rate: {config.learning_rate}, Batch size: {config.batch_size}"
+    )
+
+    # Set up logging
+    setup_logging()
+
+    # Get world size for distributed training
+    if args.distributed:
+        if "WORLD_SIZE" in os.environ:
+            world_size = int(os.environ["WORLD_SIZE"])
+        else:
+            world_size = torch.cuda.device_count()
+    else:
+        world_size = 1
+
+    # Start training
+    if args.distributed:
+        if "RANK" in os.environ:
+            # When launched with torch.distributed.launch
+            rank = int(os.environ["RANK"])
+            train_worker(rank, world_size, config, args.distributed)
+        else:
+            # When launched directly
+            mp.spawn(
+                train_worker,
+                args=(world_size, config, args.distributed),
+                nprocs=world_size,
+                join=True,
+            )
+    else:
+        # Single GPU or CPU training
+        train_worker(0, 1, config, False)
+
+
 def main():
     """CLI entrypoint with subcommands for train, eval, and export."""
     parser = argparse.ArgumentParser(
@@ -172,7 +369,17 @@ def main():
     train_parser.add_argument(
         "--config", "-c", required=True, help="Path to train config YAML file"
     )
+    train_parser.add_argument(
+        "--distributed", action="store_true", help="Use distributed training"
+    )
     train_parser.set_defaults(func=train)
+
+    # Make-examples subcommand
+    make_examples_parser = subparsers.add_parser("make-examples", help="Generate synthetic tag examples")
+    make_examples_parser.add_argument(
+        "--config", "-c", required=True, help="Path to train config YAML file"
+    )
+    make_examples_parser.set_defaults(func=make_examples)
 
     # Eval subcommand
     eval_parser = subparsers.add_parser("eval", help="Evaluate a model")
