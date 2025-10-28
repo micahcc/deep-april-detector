@@ -9,7 +9,9 @@ import cv2
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data._utils.collate import default_collate
 
 # Import configuration classes
 from atdetect.train_config import TrainConfig
@@ -168,6 +170,7 @@ def export(args):
 def setup_logging():
     """Set up logging configuration."""
     import logging
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
@@ -211,6 +214,82 @@ def cleanup_distributed():
     dist.destroy_process_group()
 
 
+def synthetic_image_collate_fn(batch):
+    """Custom collate function for SyntheticImage objects.
+
+    This function processes a batch of SyntheticImage objects and converts them
+    to a format compatible with PyTorch DataLoader.
+
+    Args:
+        batch: A list of SyntheticImage objects from the dataset.
+
+    Returns:
+        A dictionary containing batched tensors for images, bboxes, class_nums and keypoints.
+    """
+    images = []
+    bboxes = []
+    class_nums = []
+    keypoints = []
+
+    target_width = 0
+    target_height = 0
+    target_channels = 0
+    arrays = []
+    for sample in batch:
+        target_height = max(target_height, sample.image.shape[0])
+        target_width = max(target_width, sample.image.shape[1])
+        if len(sample.image.shape) == 2:
+            sample.image = np.expand_dims(sample.image, axis=2)
+        target_channels = max(target_channels, 1)
+
+    # make one big array, (B, C, H, W)
+    images = torch.zeros((len(batch), target_height, target_width, target_channels))
+    for b, sample in enumerate(batch):
+        height = sample.image.shape[0]
+        width = sample.image.shape[1]
+        channels = sample.image.shape[2]
+
+        img_tensor = torch.from_numpy(sample.image.astype(np.float32))
+        images[b, 0:height, 0:width, 0:channels] = img_tensor[:, :, :]
+
+        # Process annotations
+        sample_bboxes = []
+        sample_class_nums = []
+        sample_keypoints = []
+        for ann in sample.annotations:
+            # Get bbox coordinates
+            bbox = ann.bbox
+            sample_bboxes.append(
+                torch.tensor(
+                    [bbox.x_min, bbox.y_min, bbox.x_max, bbox.y_max],
+                    dtype=torch.float32,
+                )
+            )
+
+            # Get class number
+            sample_class_nums.append(torch.tensor(ann.class_num, dtype=torch.long))
+
+            # Process keypoints if available
+            if ann.keypoints:
+                kps = torch.tensor(
+                    [[kp.x, kp.y] for kp in ann.keypoints], dtype=torch.float32
+                )
+                sample_keypoints.append(kps)
+            else:
+                sample_keypoints.append(torch.zeros((0, 2), dtype=torch.float32))
+
+        bboxes.append(sample_bboxes)
+        class_nums.append(sample_class_nums)
+        keypoints.append(sample_keypoints)
+
+    return {
+        "images": images,
+        "bboxes": bboxes,  # List of lists of tensors
+        "class_nums": class_nums,  # List of lists of tensors
+        "keypoints": keypoints,  # List of lists of tensors
+    }
+
+
 def train_worker(rank: int, world_size: int, config: TrainConfig, distributed: bool):
     """Worker function for training process."""
     if distributed:
@@ -239,26 +318,24 @@ def train_worker(rank: int, world_size: int, config: TrainConfig, distributed: b
     if not os.path.exists(train_dir):
         os.makedirs(train_dir, exist_ok=True)
         import logging
+
         logging.warning(f"Created train directory: {train_dir}")
 
-    train_dataset = AprilTagDataLoader(
-        config.tag_type
-    )
-    
+    train_dataset = AprilTagDataLoader(config.tag_type)
+
     val_dataset = None
     if config.val_split > 0:
         val_dir = os.path.join(data_dir, "val")
         # Only create validation dataset if directory exists
         if os.path.exists(val_dir):
-            val_dataset = AprilTagDataLoader(
-                config.tag_type,
-                templates_dir=val_dir
-            )
+            val_dataset = AprilTagDataLoader(config.tag_type, templates_dir=val_dir)
         else:
             import logging
+
             logging.warning(
-                "Validation split %.2f specified but no validation directory found at %s", 
-                config.val_split, val_dir
+                "Validation split %.2f specified but no validation directory found at %s",
+                config.val_split,
+                val_dir,
             )
 
     # Create data loaders
@@ -272,6 +349,7 @@ def train_worker(rank: int, world_size: int, config: TrainConfig, distributed: b
         num_workers=4,  # Default to 4 workers
         pin_memory=True,
         drop_last=True,
+        collate_fn=synthetic_image_collate_fn,
     )
 
     val_loader = None
@@ -284,11 +362,13 @@ def train_worker(rank: int, world_size: int, config: TrainConfig, distributed: b
             sampler=val_sampler,
             num_workers=4,  # Default to 4 workers
             pin_memory=True,
+            collate_fn=synthetic_image_collate_fn,
         )
 
     # Only rank 0 process should log
     if rank == 0 or not distributed:
         import logging
+
         logging.info("Training on %i GPUs", torch.cuda.device_count())
         logging.info("Total batch size: %i", config.batch_size * world_size)
 
@@ -375,7 +455,9 @@ def main():
     train_parser.set_defaults(func=train)
 
     # Make-examples subcommand
-    make_examples_parser = subparsers.add_parser("make-examples", help="Generate synthetic tag examples")
+    make_examples_parser = subparsers.add_parser(
+        "make-examples", help="Generate synthetic tag examples"
+    )
     make_examples_parser.add_argument(
         "--config", "-c", required=True, help="Path to train config YAML file"
     )
