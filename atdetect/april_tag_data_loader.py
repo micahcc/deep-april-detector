@@ -69,7 +69,7 @@ class AprilTagDataLoader:
         skew_range: float = 0.1,  # Range of skew transformation (0-1),
         grid_rows: Tuple[int, int] = (1, 4),  # Range of grid rows
         grid_cols: Tuple[int, int] = (1, 4),  # Range of grid columns
-        grid_spacing: int = 10,  # Spacing between grid elements in pixels
+        grid_spacing_range: Tuple[int, int] = (5, 20),
         grid_border: int = 20,  # Border around the entire grid in pixels
         brightness_scale_range: Tuple[float, float] = (
             0.5,
@@ -111,7 +111,7 @@ class AprilTagDataLoader:
         # Grid layout parameters
         self.grid_rows = grid_rows
         self.grid_cols = grid_cols
-        self.grid_spacing = grid_spacing
+        self.grid_spacing_range = grid_spacing_range
         self.grid_border = grid_border
 
         # Brightness scaling parameters
@@ -289,15 +289,15 @@ class AprilTagDataLoader:
             fillcolor=0,
         )
 
-        transformed_mask_pil.save("mask.png", format="PNG")
-        transformed_template_pil.save("tftemplate.png", format="PNG")
-        template_pil.save("template.png", format="PNG")
+        # transformed_mask_pil.save("mask.png", format="PNG")
+        # transformed_template_pil.save("tftemplate.png", format="PNG")
+        # template_pil.save("template.png", format="PNG")
         transformed_template = (
             np.array(transformed_template_pil).clip(0, UINT16_MAX).astype(np.uint16)
         )
         transformed_mask = np.array(transformed_mask_pil)
-        transformed_template_pil2 = Image.fromarray(transformed_template)
-        transformed_template_pil2.save("tftemplate2.png", format="PNG")
+        # transformed_template_pil2 = Image.fromarray(transformed_template)
+        # transformed_template_pil2.save("tftemplate2.png", format="PNG")
         return transformed_template, transformed_mask, transformed_annotations
 
     def _create_template_grid(
@@ -369,12 +369,15 @@ class AprilTagDataLoader:
                     col_widths[col_idx], template_info.template.shape[1]
                 )
 
-        # Calculate total grid dimensions with spacing and border
-        grid_width = (
-            sum(col_widths) + self.grid_spacing * (cols - 1) + 2 * self.grid_border
+        # Use a single random spacing for the entire grid
+        grid_spacing = random.randint(
+            self.grid_spacing_range[0], self.grid_spacing_range[1]
         )
+
+        # Calculate total grid dimensions with spacing and border
+        grid_width = sum(col_widths) + grid_spacing * (cols - 1) + 2 * self.grid_border
         grid_height = (
-            sum(row_heights) + self.grid_spacing * (rows - 1) + 2 * self.grid_border
+            sum(row_heights) + grid_spacing * (rows - 1) + 2 * self.grid_border
         )
 
         # Create empty grid template and mask
@@ -435,9 +438,9 @@ class AprilTagDataLoader:
                 )
                 annotations.append(annotation)
 
-                x_offset += col_widths[col_idx] + self.grid_spacing
+                x_offset += col_widths[col_idx] + grid_spacing
 
-            y_offset += row_heights[row_idx] + self.grid_spacing
+            y_offset += row_heights[row_idx] + grid_spacing
 
         return grid_template, grid_mask, annotations
 
@@ -726,47 +729,47 @@ class AprilTagDataLoader:
         # Get dimensions of the transformed grid
         grid_h, grid_w = transformed_grid.shape[:2]
 
-        # Choose random position for the grid in the final image
+        # Choose random position for the grid in the final image (background)
         # Allow grid to be partially off-screen
         x_pos = random.randint(-grid_w // 2, img_width - grid_w // 2)
         y_pos = random.randint(-grid_h // 2, img_height - grid_h // 2)
 
-        image_pil = Image.fromarray(image)
-        image_pil.save("image_pil.png", format="PNG")
-        transformed_grid_pil = Image.fromarray(transformed_grid)
-        transformed_mask_pil = Image.fromarray(transformed_mask)
-        transformed_grid_pil.save("transformed_grid_pil.png", format="PNG")
-        transformed_mask_pil.save("transformed_mask_pil.png", format="PNG")
-        image_pil.paste(transformed_grid_pil, (0, 0), transformed_mask_pil)
-        image_pil.save("image_pil2.png", format="PNG")
-        image = np.array(image_pil)
-        # import ipdb
+        # Paste the transformed grid into the image
+        # Create intersection region between the image and grid
+        x_min_img = max(0, x_pos)
+        x_max_img = min(img_width, x_pos + grid_w)
+        y_min_img = max(0, y_pos)
+        y_max_img = min(img_height, y_pos + grid_h)
 
-        ## ipdb.set_trace()
-        ## Only place the visible portion of the grid
-        # if x_end_img > x_start_img and y_end_img > y_start_img:
-        #    # Extract visible region of mask
-        #    visible_mask = transformed_mask[
-        #        y_start_grid:y_end_grid, x_start_grid:x_end_grid
-        #    ]
-        #    visible_mask_pil = Image.fromarray(visible_mask)
-        #    visible_mask_pil.save("mask.png", format="PNG")
-        #    # transformed_template_pil.save("tftemplate.png", format="PNG")
-        #    # template_pil.save("template.png", format="PNG")
-        #    binary_mask = visible_mask > 0
+        # Calculate corresponding region in the transformed grid
+        x_min_grid = max(0, -x_pos)
+        x_max_grid = min(grid_w, img_width - x_pos)
+        y_min_grid = max(0, -y_pos)
+        y_max_grid = min(grid_h, img_height - y_pos)
 
-        #    # Extract visible region of grid
-        #    visible_grid = transformed_grid[
-        #        y_start_grid:y_end_grid, x_start_grid:x_end_grid
-        #    ]
-        #    visible_grid_pil = Image.fromarray(visible_grid)
-        #    visible_grid_pil.save("grid.png", format="PNG")
+        # Check if there's a valid intersection
+        if (
+            x_max_img > x_min_img
+            and y_max_img > y_min_img
+            and x_max_grid > x_min_grid
+            and y_max_grid > y_min_grid
+        ):
 
-        #    # Place the visible part of the grid on the image
-        #    roi = image[y_start_img:y_end_img, x_start_img:x_end_img]
-        #    roi[binary_mask] = visible_grid[binary_mask]
-        #    image_pil = Image.fromarray(image)
-        #    image_pil.save("image.png", format="PNG")
+            # Get the relevant portions of the image and grid
+            img_region = image[y_min_img:y_max_img, x_min_img:x_max_img]
+            grid_region = transformed_grid[y_min_grid:y_max_grid, x_min_grid:x_max_grid]
+            mask_region = (
+                transformed_mask[y_min_grid:y_max_grid, x_min_grid:x_max_grid].astype(
+                    np.float32
+                )
+                / 255.0
+            )
+
+            # Use the mask to combine the grid and image (maintaining single channel)
+            image[y_min_img:y_max_img, x_min_img:x_max_img] = (
+                (grid_region.astype(np.float32) * mask_region)
+                + (img_region.astype(np.float32) * (1 - mask_region))
+            ).astype(np.uint16)
 
         # Adjust annotations for placement in the final image
         final_annotations = []
