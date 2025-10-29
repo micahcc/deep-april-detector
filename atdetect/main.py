@@ -10,9 +10,7 @@ from PIL import Image, ImageDraw, ImageFont
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-import torch.nn.functional as F
 from torch.utils.data import DataLoader, DistributedSampler
-from torch.utils.data._utils.collate import default_collate
 
 # Import configuration classes
 from atdetect.train_config import TrainConfig
@@ -236,7 +234,6 @@ def synthetic_image_collate_fn(batch):
     target_width = 0
     target_height = 0
     target_channels = 0
-    arrays = []
     for sample in batch:
         target_height = max(target_height, sample.image.shape[0])
         target_width = max(target_width, sample.image.shape[1])
@@ -272,17 +269,14 @@ def synthetic_image_collate_fn(batch):
             sample_class_nums.append(torch.tensor(ann.class_num, dtype=torch.long))
 
             # Process keypoints if available
-            if ann.keypoints:
-                kps = torch.tensor(
-                    [[kp.x, kp.y] for kp in ann.keypoints], dtype=torch.float32
-                )
-                sample_keypoints.append(kps)
-            else:
-                sample_keypoints.append(torch.zeros((0, 2), dtype=torch.float32))
+            kps = torch.tensor(
+                [[kp.x, kp.y] for kp in ann.keypoints], dtype=torch.float32
+            )
+            sample_keypoints.append(kps)
 
-        bboxes.append(sample_bboxes)
-        class_nums.append(sample_class_nums)
-        keypoints.append(sample_keypoints)
+        bboxes.append(torch.stack(sample_bboxes))
+        class_nums.append(torch.stack(sample_class_nums))
+        keypoints.append(torch.stack(sample_keypoints))
 
     return {
         "images": images,

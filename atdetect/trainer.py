@@ -162,11 +162,11 @@ class Trainer:
             epoch_metrics["data_time"] += data_time
 
             # Get inputs and targets
-            images = batch["image"].to(self.device)
+            images = batch["images"].to(self.device)
             targets = {
-                "boxes": batch["boxes"].to(self.device),
-                "keypoints": batch["keypoints"].to(self.device),
-                "labels": batch["labels"].to(self.device),
+                "boxes": [b.to(self.device) for b in batch["bboxes"]],
+                "keypoints": [k.to(self.device) for k in batch["keypoints"]],
+                "labels": [c.to(self.device) for c in batch["class_nums"]],
             }
 
             # Forward pass

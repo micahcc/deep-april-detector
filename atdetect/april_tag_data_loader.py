@@ -28,14 +28,8 @@ class TemplateInfo(NamedTuple):
 
 
 # Import background generation functionality
-from atdetect.background_type import BackgroundType
 from atdetect.direction import Direction
-from atdetect.filter_type import FilterType
 from atdetect.gradient_type import GradientType
-from atdetect.noise_type import NoiseType
-from atdetect.pattern_type import PatternType
-from atdetect.shape_type import ShapeType
-from atdetect.effect_type import EffectType
 
 from atdetect.background_generators import (
     UINT16_MAX,
@@ -113,29 +107,29 @@ class AprilTagDataLoader:
         )  # Clamp to [0, 1]
 
         # Load template paths and class numbers
-        self.template_paths, self.class_nums = self._load_templates()
+        self.template_images, self.class_nums = self._load_templates()
 
     def _load_templates(self) -> Tuple[List[Path], List[int]]:
         """Load template paths and extract class numbers."""
         if not self.templates_dir.exists():
             raise ValueError(f"Templates directory not found: {self.templates_dir}")
 
-        paths = []
+        images = []
         class_nums = []
 
         for file_path in self.templates_dir.glob("*.png"):
             # Parse class number from filename (e.g., tag16h5_0.png -> 0)
             try:
                 class_num = int(file_path.stem.split("_")[-1])
-                paths.append(file_path)
+                images.append(Image.open(file_path))
                 class_nums.append(class_num)
             except ValueError:
                 print(f"Skipping {file_path}: Could not parse class number")
 
-        if not paths:
+        if not images:
             raise ValueError(f"No template images found in {self.templates_dir}")
 
-        return paths, class_nums
+        return images, class_nums
 
     @staticmethod
     def _scale_template(
@@ -304,7 +298,7 @@ class AprilTagDataLoader:
                 - List of annotations for each template in the grid
         """
         # Decide on grid dimensions, ensuring we don't exceed the number of available templates
-        num_templates = len(self.template_paths)
+        num_templates = len(self.template_images)
 
         # First choose a random number of columns within the specified range
         cols = random.randint(self.grid_cols[0], min(self.grid_cols[1], num_templates))
@@ -327,7 +321,7 @@ class AprilTagDataLoader:
 
         # Generate templates for the grid (all with same scale factor)
         # Use random.sample to select unique indices without replacement
-        template_indices = random.sample(range(len(self.template_paths)), rows * cols)
+        template_indices = random.sample(range(len(self.template_images)), rows * cols)
 
         # Generate a template for each selected index
         templates_info = []
@@ -447,7 +441,7 @@ class AprilTagDataLoader:
             TemplateInfo containing the template, mask, class number, and keypoints
         """
         # Choose random template
-        idx = random.randint(0, len(self.template_paths) - 1)
+        idx = random.randint(0, len(self.template_images) - 1)
         return self._generate_template_by_index(idx, scale_factor)
 
     def _generate_template_by_index(
@@ -463,15 +457,14 @@ class AprilTagDataLoader:
         Returns:
             TemplateInfo containing the template, mask, class number, and keypoints
         """
-        if idx < 0 or idx >= len(self.template_paths):
+        if idx < 0 or idx >= len(self.template_images):
             print(f"Invalid template index: {idx}")
             return None
 
-        template_path = self.template_paths[idx]
+        template_pil = self.template_images[idx]
         class_num = self.class_nums[idx]
 
         # Load template and convert to 16-bit
-        template_pil = Image.open(str(template_path))
         if template_pil.mode != "I":  # Check if already 16-bit grayscale
             # Convert to grayscale if needed
             if template_pil.mode != "L":
@@ -796,23 +789,15 @@ class AprilTagDataLoader:
                     y_max=min(img_height, placed_bbox.y_max),
                 )
 
-                # Filter keypoints to only include those visible in the image
-                visible_keypoints = [
-                    kp
-                    for kp in placed_keypoints
-                    if 0 <= kp.x < img_width and 0 <= kp.y < img_height
-                ]
-
-                # Only include the annotation if we have at least some keypoints visible
-                if visible_keypoints:
-                    # Create new annotation with clipped bbox and visible keypoints
-                    placed_annotation = AprilTagAnnotation(
-                        class_name=annotation.class_name,
-                        class_num=annotation.class_num,
-                        bbox=clipped_bbox,
-                        keypoints=visible_keypoints,
-                    )
-                    final_annotations.append(placed_annotation)
+                # NOTE: its ok if our bounding boxe are out of frame
+                # we still want to predict the location!
+                placed_annotation = AprilTagAnnotation(
+                    class_name=annotation.class_name,
+                    class_num=annotation.class_num,
+                    bbox=clipped_bbox,
+                    keypoints=placed_keypoints,
+                )
+                final_annotations.append(placed_annotation)
 
         return SyntheticImage(
             image=image,

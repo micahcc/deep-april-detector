@@ -641,8 +641,6 @@ def generate_random_background(
         Random background as uint16 array
     """
     bg_type = random.choice(list(BackgroundType))
-
-    print(bg_type)
     if bg_type == BackgroundType.SOLID:
         background = create_solid_background(height, width, color_range)
 
