@@ -413,9 +413,6 @@ class AprilTagDataLoader:
             if template_info is not None:
                 templates_info.append(template_info)
 
-        # If any templates failed to generate, we still have the assertion
-        # that will catch this case during development
-
         # Reshape templates into grid layout
         templates_grid = [
             templates_info[i : i + cols] for i in range(0, len(templates_info), cols)
@@ -934,16 +931,14 @@ class AprilTagDataLoader:
             visible_mask = transformed_mask[
                 y_start_grid:y_end_grid, x_start_grid:x_end_grid
             ]
-            binary_mask = visible_mask > 0
-
-            # Extract visible region of grid
             visible_grid = transformed_grid[
                 y_start_grid:y_end_grid, x_start_grid:x_end_grid
             ]
 
             # Place the visible part of the grid on the image
-            roi = image[y_start_img:y_end_img, x_start_img:x_end_img]
-            roi[binary_mask] = visible_grid[binary_mask]
+            image[y_start_img:y_end_img, x_start_img:x_end_img][visible_mask > 0] = (
+                visible_grid[visible_grid > 0]
+            )
 
         # Adjust annotations for placement in the final image
         final_annotations = []
