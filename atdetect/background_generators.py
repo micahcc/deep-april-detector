@@ -7,7 +7,7 @@ for synthetic AprilTag training images. All functions operate on uint16 grayscal
 
 import random
 import numpy as np
-from PIL import Image, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter
 from typing import Tuple, List, Optional, Union, Callable
 
 from atdetect.background_type import BackgroundType
@@ -405,6 +405,7 @@ def create_shape_background(
     background = np.ones((height, width), dtype=np.uint16) * random.randint(
         color_range[0], color_range[1]
     )
+    draw = ImageDraw.Draw(Image.fromarray(background))
 
     # Add layers of shapes
     for _ in range(num_layers):
@@ -421,7 +422,6 @@ def create_shape_background(
                 thickness = random.choice([-1, random.randint(1, 5)])  # -1 means filled
 
                 # Draw circle
-                draw = ImageDraw.Draw(Image.fromarray(background))
                 if thickness == -1:  # Filled circle
                     draw.ellipse(
                         [
@@ -439,7 +439,6 @@ def create_shape_background(
                             ],
                             outline=shape_color,
                         )
-                background = np.array(draw.im)
 
             elif shape_type == ShapeType.RECTANGLE:
                 # Random rectangle
@@ -450,7 +449,6 @@ def create_shape_background(
                 thickness = random.choice([-1, random.randint(1, 5)])  # -1 means filled
 
                 # Draw rectangle
-                draw = ImageDraw.Draw(Image.fromarray(background))
                 if thickness == -1:  # Filled rectangle
                     draw.rectangle([(x1, y1), (x2, y2)], fill=shape_color)
                 else:  # Outlined rectangle
@@ -458,8 +456,6 @@ def create_shape_background(
                         draw.rectangle(
                             [(x1 + i, y1 + i), (x2 - i, y2 - i)], outline=shape_color
                         )
-                background = np.array(draw.im)
-
             else:  # ShapeType.LINE
                 # Random line
                 x1 = random.randint(0, width - 1)
@@ -469,9 +465,7 @@ def create_shape_background(
                 thickness = random.randint(1, 5)
 
                 # Draw line
-                draw = ImageDraw.Draw(Image.fromarray(background))
                 draw.line([(x1, y1), (x2, y2)], fill=shape_color, width=thickness)
-                background = np.array(draw.im)
 
     return background
 

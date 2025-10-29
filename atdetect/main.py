@@ -25,6 +25,8 @@ from atdetect.april_tag_data_loader import AprilTagDataLoader
 from atdetect.models.detector import AprilTagDetector
 from atdetect.trainer import Trainer
 
+UINT16_MAX = 2**16 - 1
+
 
 def load_config(config_path: str, config_class):
     """Load and parse a YAML config file into the specified dataclass."""
@@ -117,7 +119,7 @@ def make_examples(args):
                     (int(bbox.x_min), int(bbox.y_min)),
                     (int(bbox.x_max), int(bbox.y_max)),
                 ],
-                outline=(0, 255, 0),  # Green color
+                outline=UINT16_MAX,
                 width=2,
             )
 
@@ -125,7 +127,7 @@ def make_examples(args):
             for kp in annotation.keypoints:
                 draw.ellipse(
                     [(int(kp.x) - 5, int(kp.y) - 5), (int(kp.x) + 5, int(kp.y) + 5)],
-                    fill=(0, 0, 255),  # Red color
+                    outline=UINT16_MAX
                 )
 
             # Draw class information
@@ -133,7 +135,7 @@ def make_examples(args):
             draw.text(
                 (int(bbox.x_min), int(bbox.y_min) - 10),
                 f"{annotation.class_name} #{annotation.class_num}",
-                fill=(255, 255, 0),  # Yellow color
+                outline=UINT16_MAX
             )
 
             # Update the numpy array with the modified image
