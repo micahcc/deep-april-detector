@@ -166,7 +166,7 @@ class AprilTagDataLoader:
     def _transform_template(
         template: np.ndarray,
         mask: np.ndarray,
-        keypoints: List[KeyPoint],
+        annotations: List[AprilTagAnnotation],
         angle: float,
         skew_range: float,
     ) -> Tuple[np.ndarray, np.ndarray, List[KeyPoint]]:
@@ -182,17 +182,20 @@ class AprilTagDataLoader:
         Returns:
             Tuple of (transformed_template, transformed_mask, transformed_keypoints)
         """
+
         # Get dimensions of the template
         h, w = template.shape[:2]
         center = (w // 2, h // 2)  # Center of the template
 
         # Calculate rotation matrix manually (2x3 matrix)
         angle_rad = math.radians(-angle)  # Negative angle for clockwise rotation
+        skew_x = random.uniform(-skew_range, skew_range)
+        skew_y = random.uniform(-skew_range, skew_range)
         cos_val = math.cos(angle_rad)
         sin_val = math.sin(angle_rad)
 
         # Create rotation matrix [cos, -sin, x_shift; sin, cos, y_shift]
-        rotation_matrix = np.zeros((2, 3), dtype=np.float32)
+        rotation_matrix = np.zeros((3, 3), dtype=np.float32)
         rotation_matrix[0, 0] = cos_val
         rotation_matrix[0, 1] = -sin_val
         rotation_matrix[1, 0] = sin_val
@@ -207,67 +210,13 @@ class AprilTagDataLoader:
         sin_angle = abs(math.sin(angle_rad))
 
         # Calculate new dimensions for rotation
-        new_w = int(w * cos_angle + h * sin_angle)
-        new_h = int(w * sin_angle + h * cos_angle)
+        new_w = int(w * cos_angle * (1 + skew_x) + h * sin_angle)
+        new_h = int(w * sin_angle + h * cos_angle * (1 + skew_y))
 
         # Adjust rotation matrix to account for new dimensions
         rotation_matrix[0, 2] += (new_w - w) // 2
         rotation_matrix[1, 2] += (new_h - h) // 2
-
-        # Apply rotation to template and mask using PIL
-        # First adjust rotation matrix for new dimensions
-        rotation_matrix[0, 2] += (new_w - w) / 2
-        rotation_matrix[1, 2] += (new_h - h) / 2
-
-        # Convert rotation matrix to PIL's transform format
-        # PIL's transform format is (a, b, c, d, e, f) which corresponds to
-        # [a c e] in the matrix form [x']
-        # [b d f]                     [y']
-        #                             [1 ]
-        pil_transform = (
-            rotation_matrix[0, 0],
-            rotation_matrix[1, 0],
-            rotation_matrix[0, 1],
-            rotation_matrix[1, 1],
-            rotation_matrix[0, 2],
-            rotation_matrix[1, 2],
-        )
-
-        # Apply transform
-        template_pil = Image.fromarray(template)
-        mask_pil = Image.fromarray(mask)
-
-        rotated_template_pil = template_pil.transform(
-            (new_w, new_h),
-            Image.AFFINE,
-            pil_transform,
-            resample=Image.NEAREST,
-            fillcolor=0,
-        )
-
-        rotated_mask_pil = mask_pil.transform(
-            (new_w, new_h),
-            Image.AFFINE,
-            pil_transform,
-            resample=Image.NEAREST,
-            fillcolor=0,
-        )
-
-        rotated_template = np.array(rotated_template_pil)
-        rotated_mask = np.array(rotated_mask_pil)
-
-        # Rotate keypoints
-        rotated_keypoints = []
-        for kp in keypoints:
-            # Translate keypoint to center, then apply rotation matrix
-            kp_matrix = np.array([kp.x, kp.y, 1.0])
-            rotated_x, rotated_y = rotation_matrix @ kp_matrix
-            rotated_keypoints.append(KeyPoint(x=float(rotated_x), y=float(rotated_y)))
-
-        # Now apply skew transformation
-        # Create random skew factors
-        skew_x = random.uniform(-skew_range, skew_range)
-        skew_y = random.uniform(-skew_range, skew_range)
+        rotation_matrix[2, 2] = 1
 
         # Create skew transformation matrix (3x3 for homography)
         # [1, skew_x, 0]   [x]   [x + skew_x*y]
@@ -276,96 +225,80 @@ class AprilTagDataLoader:
         skew_matrix = np.array(
             [[1.0, skew_x, 0], [skew_y, 1.0, 0], [0.0, 0.0, 1.0]], dtype=np.float32
         )
+        transform_matrix = skew_matrix @ rotation_matrix
 
-        # Calculate the bounds after skew
-        corners = np.array(
-            [
-                [0, 0, 1],  # Top-left
-                [new_w - 1, 0, 1],  # Top-right
-                [new_w - 1, new_h - 1, 1],  # Bottom-right
-                [0, new_h - 1, 1],  # Bottom-left
-            ]
-        )
+        # Rotate keypoints
+        transformed_annotations = []
+        for an in annotations:
+            transformed_keypoints = []
+            x_min = float("inf")
+            x_max = -float("inf")
+            y_min = float("inf")
+            y_max = -float("inf")
+            for kp in an.keypoints:
+                # Translate keypoint to center, then apply tfm matrix
+                kp_matrix = np.array([kp.x, kp.y, 1.0])
+                transformed_x, transformed_y, _ = transform_matrix @ kp_matrix
+                transformed_keypoints.append(
+                    KeyPoint(x=float(transformed_x), y=float(transformed_y))
+                )
+                x_min = min(transformed_x, x_min)
+                x_max = max(transformed_x, x_max)
+                y_min = min(transformed_y, y_min)
+                y_max = max(transformed_y, y_max)
 
-        # Apply skew to corners
-        skewed_corners = []
-        for corner in corners:
-            skewed_corner = skew_matrix @ corner
-            skewed_corners.append([skewed_corner[0], skewed_corner[1]])
-
-        skewed_corners = np.array(skewed_corners)
-
-        # Calculate new bounds
-        min_x, min_y = np.min(skewed_corners, axis=0).astype(int)
-        max_x, max_y = np.ceil(np.max(skewed_corners, axis=0)).astype(int)
-
-        # Ensure positive coordinates by adding translation if needed
-        tx, ty = 0, 0
-        if min_x < 0:
-            tx = -min_x
-        if min_y < 0:
-            ty = -min_y
-
-        # Add translation to skew_matrix
-        translation_matrix = np.array(
-            [[1.0, 0.0, tx], [0.0, 1.0, ty], [0.0, 0.0, 1.0]], dtype=np.float32
-        )
-
-        # Combine translation and skew
-        final_skew_matrix = translation_matrix @ skew_matrix
-
-        # Calculate new dimensions
-        final_w = max_x - min_x + 1 + int(tx)
-        final_h = max_y - min_y + 1 + int(ty)
-
-        # Apply skew transformation to the rotated template and mask
-        # We need the 2x3 portion of the 3x3 matrix for warpAffine
-        skew_matrix_2x3 = final_skew_matrix[:2, :]
-
-        # Convert skew matrix to PIL's transform format
-        pil_skew_transform = (
-            skew_matrix_2x3[0, 0],
-            skew_matrix_2x3[1, 0],
-            skew_matrix_2x3[0, 1],
-            skew_matrix_2x3[1, 1],
-            skew_matrix_2x3[0, 2],
-            skew_matrix_2x3[1, 2],
-        )
-
-        # Apply transform using PIL
-        rotated_template_pil = Image.fromarray(rotated_template)
-        rotated_mask_pil = Image.fromarray(rotated_mask)
-
-        final_template_pil = rotated_template_pil.transform(
-            (final_w, final_h),
-            Image.AFFINE,
-            pil_skew_transform,
-            resample=Image.NEAREST,
-            fillcolor=0,
-        )
-
-        final_mask_pil = rotated_mask_pil.transform(
-            (final_w, final_h),
-            Image.AFFINE,
-            pil_skew_transform,
-            resample=Image.NEAREST,
-            fillcolor=0,
-        )
-
-        final_template = np.array(final_template_pil)
-        final_mask = np.array(final_mask_pil)
-
-        # Apply skew to rotated keypoints
-        final_keypoints = []
-        for kp in rotated_keypoints:
-            # Convert to homogeneous coordinates and apply skew
-            kp_matrix = np.array([kp.x, kp.y, 1.0])
-            skewed_point = final_skew_matrix @ kp_matrix
-            final_keypoints.append(
-                KeyPoint(x=float(skewed_point[0]), y=float(skewed_point[1]))
+            transformed_annotations.append(
+                AprilTagAnnotation(
+                    class_name=an.class_name,
+                    class_num=an.class_num,
+                    bbox=BoundingBox(
+                        x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max
+                    ),
+                    keypoints=transformed_keypoints,
+                )
             )
 
-        return final_template, final_mask, final_keypoints
+        # Apply transform
+        # convert to uint32 otherwise transform fails silently (black image)
+        template_pil = Image.fromarray(template.astype(np.int32))
+        mask_pil = Image.fromarray(mask)
+
+        transform_matrix_inv = np.linalg.inv(transform_matrix)
+        pil_params = (
+            transform_matrix_inv[0, 0],
+            transform_matrix_inv[0, 1],
+            transform_matrix_inv[0, 2],
+            transform_matrix_inv[1, 0],
+            transform_matrix_inv[1, 1],
+            transform_matrix_inv[1, 2],
+        )
+
+        transformed_template_pil = template_pil.transform(
+            (new_w, new_h),
+            Image.AFFINE,
+            pil_params,
+            resample=Image.BICUBIC,
+            fillcolor=0,
+        )
+
+        transformed_mask_pil = mask_pil.transform(
+            (new_w, new_h),
+            Image.AFFINE,
+            pil_params,
+            resample=Image.BICUBIC,
+            fillcolor=0,
+        )
+
+        transformed_mask_pil.save("mask.png", format="PNG")
+        transformed_template_pil.save("tftemplate.png", format="PNG")
+        template_pil.save("template.png", format="PNG")
+        transformed_template = (
+            np.array(transformed_template_pil).clip(0, UINT16_MAX).astype(np.uint16)
+        )
+        transformed_mask = np.array(transformed_mask_pil)
+        transformed_template_pil2 = Image.fromarray(transformed_template)
+        transformed_template_pil2.save("tftemplate2.png", format="PNG")
+        return transformed_template, transformed_mask, transformed_annotations
 
     def _create_template_grid(
         self,
@@ -758,131 +691,6 @@ class AprilTagDataLoader:
         # Convert back to uint16 for the final template
         return adjusted_array.astype(np.uint16)
 
-    def _transform_grid(
-        self,
-        grid_template: np.ndarray,
-        grid_mask: np.ndarray,
-        annotations: List[AprilTagAnnotation],
-    ) -> Tuple[np.ndarray, np.ndarray, List[AprilTagAnnotation]]:
-        """Apply rotation and skew to the entire grid.
-
-        Args:
-            grid_template: Grid template image
-            grid_mask: Grid mask
-            annotations: List of annotations for templates in the grid
-
-        Returns:
-            Tuple of transformed grid, mask, and updated annotations
-        """
-        # Get dimensions of the grid
-        h, w = grid_template.shape[:2]
-        center = (w // 2, h // 2)  # Center of the grid
-
-        # Choose a random rotation angle
-        rotation_angle = random.uniform(self.min_rotation, self.max_rotation)
-
-        # Create our own rotation matrix (2x3 matrix)
-        angle_rad = math.radians(
-            -rotation_angle
-        )  # Negative angle for clockwise rotation
-        cos_val = math.cos(angle_rad)
-        sin_val = math.sin(angle_rad)
-
-        # Create rotation matrix [cos, -sin, x_shift; sin, cos, y_shift]
-        rotation_matrix = np.zeros((2, 3), dtype=np.float32)
-        rotation_matrix[0, 0] = cos_val
-        rotation_matrix[0, 1] = -sin_val
-        rotation_matrix[1, 0] = sin_val
-        rotation_matrix[1, 1] = cos_val
-
-        # Calculate shift to rotate around the center point
-        rotation_matrix[0, 2] = (1 - cos_val) * center[0] + sin_val * center[1]
-        rotation_matrix[1, 2] = -sin_val * center[0] + (1 - cos_val) * center[1]
-
-        # Calculate new dimensions after rotation
-        angle_rad = math.radians(rotation_angle)
-        cos_angle = abs(math.cos(angle_rad))
-        sin_angle = abs(math.sin(angle_rad))
-
-        # Calculate new dimensions for rotation
-        new_w = int(w * cos_angle + h * sin_angle)
-        new_h = int(w * sin_angle + h * cos_angle)
-
-        # Adjust rotation matrix to account for new dimensions
-        rotation_matrix[0, 2] += (new_w - w) // 2
-        rotation_matrix[1, 2] += (new_h - h) // 2
-
-        # Convert rotation matrix to PIL's transform format
-        pil_transform = (
-            rotation_matrix[0, 0],
-            rotation_matrix[1, 0],
-            rotation_matrix[0, 1],
-            rotation_matrix[1, 1],
-            rotation_matrix[0, 2],
-            rotation_matrix[1, 2],
-        )
-
-        # Apply transform using PIL
-        grid_template_pil = Image.fromarray(grid_template)
-        grid_mask_pil = Image.fromarray(grid_mask)
-
-        rotated_template_pil = grid_template_pil.transform(
-            (new_w, new_h),
-            Image.AFFINE,
-            pil_transform,
-            resample=Image.NEAREST,
-            fillcolor=0,
-        )
-
-        rotated_mask_pil = grid_mask_pil.transform(
-            (new_w, new_h),
-            Image.AFFINE,
-            pil_transform,
-            resample=Image.NEAREST,
-            fillcolor=0,
-        )
-
-        rotated_template = np.array(rotated_template_pil)
-        rotated_mask = np.array(rotated_mask_pil)
-
-        # Update annotations with rotated keypoints
-        rotated_annotations = []
-        for annotation in annotations:
-            # Rotate keypoints
-            rotated_keypoints = []
-            for kp in annotation.keypoints:
-                # Apply rotation matrix
-                kp_matrix = np.array([kp.x, kp.y, 1.0])
-                rotated_x, rotated_y = rotation_matrix @ kp_matrix
-                rotated_keypoints.append(
-                    KeyPoint(x=float(rotated_x), y=float(rotated_y))
-                )
-
-            # Calculate new bounding box from rotated keypoints
-            kp_coords = np.array([[kp.x, kp.y] for kp in rotated_keypoints])
-            x_min = float(np.min(kp_coords[:, 0]))
-            y_min = float(np.min(kp_coords[:, 1]))
-            x_max = float(np.max(kp_coords[:, 0]))
-            y_max = float(np.max(kp_coords[:, 1]))
-
-            new_bbox = BoundingBox(
-                x_min=x_min,
-                y_min=y_min,
-                x_max=x_max,
-                y_max=y_max,
-            )
-
-            # Create updated annotation
-            rotated_annotation = AprilTagAnnotation(
-                class_name=annotation.class_name,
-                class_num=annotation.class_num,
-                bbox=new_bbox,
-                keypoints=rotated_keypoints,
-            )
-            rotated_annotations.append(rotated_annotation)
-
-        return rotated_template, rotated_mask, rotated_annotations
-
     def generate_sample(self) -> SyntheticImage:
         """Generate a synthetic image with AprilTag templates arranged in a grid."""
         # Choose random image size divisible by 64
@@ -904,8 +712,15 @@ class AprilTagDataLoader:
         grid_template = self._apply_brightness_variation(grid_template, grid_mask)
 
         # Apply transformations (rotation and skew) to the entire grid as a single unit
+        angle = random.uniform(self.min_rotation, self.max_rotation)
         transformed_grid, transformed_mask, transformed_annotations = (
-            self._transform_grid(grid_template, grid_mask, grid_annotations)
+            self._transform_template(
+                grid_template,
+                grid_mask,
+                grid_annotations,
+                angle,
+                self.skew_range,
+            )
         )
 
         # Get dimensions of the transformed grid
@@ -916,34 +731,42 @@ class AprilTagDataLoader:
         x_pos = random.randint(-grid_w // 2, img_width - grid_w // 2)
         y_pos = random.randint(-grid_h // 2, img_height - grid_h // 2)
 
-        # Calculate intersection of grid and image
-        x_start_img = max(0, x_pos)
-        y_start_img = max(0, y_pos)
-        x_end_img = min(img_width, x_pos + grid_w)
-        y_end_img = min(img_height, y_pos + grid_h)
+        image_pil = Image.fromarray(image)
+        image_pil.save("image_pil.png", format="PNG")
+        transformed_grid_pil = Image.fromarray(transformed_grid)
+        transformed_mask_pil = Image.fromarray(transformed_mask)
+        transformed_grid_pil.save("transformed_grid_pil.png", format="PNG")
+        transformed_mask_pil.save("transformed_mask_pil.png", format="PNG")
+        image_pil.paste(transformed_grid_pil, (0, 0), transformed_mask_pil)
+        image_pil.save("image_pil2.png", format="PNG")
+        image = np.array(image_pil)
+        # import ipdb
 
-        # Calculate corresponding positions in grid
-        x_start_grid = max(0, -x_pos)
-        y_start_grid = max(0, -y_pos)
-        x_end_grid = grid_w - max(0, (x_pos + grid_w) - img_width)
-        y_end_grid = grid_h - max(0, (y_pos + grid_h) - img_height)
+        ## ipdb.set_trace()
+        ## Only place the visible portion of the grid
+        # if x_end_img > x_start_img and y_end_img > y_start_img:
+        #    # Extract visible region of mask
+        #    visible_mask = transformed_mask[
+        #        y_start_grid:y_end_grid, x_start_grid:x_end_grid
+        #    ]
+        #    visible_mask_pil = Image.fromarray(visible_mask)
+        #    visible_mask_pil.save("mask.png", format="PNG")
+        #    # transformed_template_pil.save("tftemplate.png", format="PNG")
+        #    # template_pil.save("template.png", format="PNG")
+        #    binary_mask = visible_mask > 0
 
-        # Only place the visible portion of the grid
-        if x_end_img > x_start_img and y_end_img > y_start_img:
-            # Extract visible region of mask
-            visible_mask = transformed_mask[
-                y_start_grid:y_end_grid, x_start_grid:x_end_grid
-            ]
-            binary_mask = visible_mask > 0
+        #    # Extract visible region of grid
+        #    visible_grid = transformed_grid[
+        #        y_start_grid:y_end_grid, x_start_grid:x_end_grid
+        #    ]
+        #    visible_grid_pil = Image.fromarray(visible_grid)
+        #    visible_grid_pil.save("grid.png", format="PNG")
 
-            # Extract visible region of grid
-            visible_grid = transformed_grid[
-                y_start_grid:y_end_grid, x_start_grid:x_end_grid
-            ]
-
-            # Place the visible part of the grid on the image
-            roi = image[y_start_img:y_end_img, x_start_img:x_end_img]
-            roi[binary_mask] = visible_grid[binary_mask]
+        #    # Place the visible part of the grid on the image
+        #    roi = image[y_start_img:y_end_img, x_start_img:x_end_img]
+        #    roi[binary_mask] = visible_grid[binary_mask]
+        #    image_pil = Image.fromarray(image)
+        #    image_pil.save("image.png", format="PNG")
 
         # Adjust annotations for placement in the final image
         final_annotations = []

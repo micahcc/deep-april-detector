@@ -452,9 +452,9 @@ def create_shape_background(
                 if thickness == -1:  # Filled rectangle
                     draw.rectangle([(x1, y1), (x2, y2)], fill=shape_color)
                 else:  # Outlined rectangle
-                    for i in range(thickness):
+                    for i in range(1, thickness + 1):
                         draw.rectangle(
-                            [(x1 + i, y1 + i), (x2 - i, y2 - i)], outline=shape_color
+                            [(x1 - i, y1 - i), (x2 + i, y2 + i)], outline=shape_color
                         )
             else:  # ShapeType.LINE
                 # Random line
