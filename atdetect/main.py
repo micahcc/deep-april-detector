@@ -20,7 +20,6 @@ from atdetect.eval_config import EvalConfig
 from atdetect.export_config import ExportConfig
 
 # Import data loader components
-from atdetect.background_complexity import BackgroundComplexity
 from atdetect.april_tag_data_loader import AprilTagDataLoader
 from atdetect.models.detector import AprilTagDetector
 from atdetect.trainer import Trainer
@@ -69,6 +68,7 @@ def load_config(config_path: str, config_class):
 def make_examples(args):
     """Handle the make-examples subcommand for generating synthetic tag examples."""
     config = load_config(args.config, TrainConfig)
+    count = args.count
     print(f"Generating examples of {config.tag_type} tags")
     print(
         f"Model: {config.model_name}, Learning rate: {config.learning_rate}, Batch size: {config.batch_size}"
@@ -80,7 +80,6 @@ def make_examples(args):
         min_scale_factor=1.5,
         max_scale_factor=5.0,
         tags_per_image=(1, 3),
-        bg_complexity=BackgroundComplexity.COMPLEX,  # Use complex backgrounds for better training
         brightness_variation_range=0.4,  # Allow +/-40% brightness variation in tags
     )
 
@@ -88,7 +87,7 @@ def make_examples(args):
     os.makedirs("output", exist_ok=True)
 
     # Generate and save a few samples
-    for i in range(5):
+    for i in range(count):
         sample = data_loader.generate_sample()
 
         # Perform min-max scaling for better visualization of 16-bit images
@@ -127,7 +126,7 @@ def make_examples(args):
             for kp in annotation.keypoints:
                 draw.ellipse(
                     [(int(kp.x) - 5, int(kp.y) - 5), (int(kp.x) + 5, int(kp.y) + 5)],
-                    outline=UINT16_MAX
+                    outline=UINT16_MAX,
                 )
 
             # Draw class information
@@ -135,7 +134,7 @@ def make_examples(args):
             draw.text(
                 (int(bbox.x_min), int(bbox.y_min) - 10),
                 f"{annotation.class_name} #{annotation.class_num}",
-                outline=UINT16_MAX
+                outline=UINT16_MAX,
             )
 
             # Update the numpy array with the modified image
@@ -145,9 +144,8 @@ def make_examples(args):
         Image.fromarray(image_8bit).save(f"output/sample_{i}.png")
         Image.fromarray(vis_image).save(f"output/sample_{i}_annotated.png")
 
-    print(f"Generated 5 sample images in the 'output' directory for visualization.")
     print(
-        f"Images use min-max scaling per channel for optimal visualization of 16-bit data."
+        f"Generated {count} sample images in the 'output' directory for visualization."
     )
 
 
@@ -464,6 +462,9 @@ def main():
     )
     make_examples_parser.add_argument(
         "--config", "-c", required=True, help="Path to train config YAML file"
+    )
+    make_examples_parser.add_argument(
+        "--count", "-C", default=10, type=int, help="How many to generate"
     )
     make_examples_parser.set_defaults(func=make_examples)
 

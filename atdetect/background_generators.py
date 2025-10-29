@@ -7,7 +7,7 @@ for synthetic AprilTag training images. All functions operate on uint16 grayscal
 
 import random
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
 from typing import Tuple, List, Optional, Union, Callable
 
 from atdetect.background_type import BackgroundType
@@ -405,7 +405,8 @@ def create_shape_background(
     background = np.ones((height, width), dtype=np.uint16) * random.randint(
         color_range[0], color_range[1]
     )
-    draw = ImageDraw.Draw(Image.fromarray(background))
+    im = Image.fromarray(background)
+    draw = ImageDraw.Draw(im)
 
     # Add layers of shapes
     for _ in range(num_layers):
@@ -467,7 +468,7 @@ def create_shape_background(
                 # Draw line
                 draw.line([(x1, y1), (x2, y2)], fill=shape_color, width=thickness)
 
-    return background
+    return np.array(im)
 
 
 def apply_noise_texture(
@@ -525,22 +526,17 @@ def apply_mandelbrot_effect(
     pil_image = Image.fromarray(scaled_image)
 
     # Create Mandelbrot effect
-    try:
-        effect_img = Image.effect_mandelbrot(
-            (width, height),  # size parameter
-            (0, 0, width, height),  # extent parameter
-            random.randint(100, 500),  # quality parameter
-        )
+    effect_img = Image.effect_mandelbrot(
+        (width, height),  # size parameter
+        (0, 0, width, height),  # extent parameter
+        random.randint(100, 500),  # quality parameter
+    )
 
-        # Blend with original
-        blended = Image.blend(pil_image, effect_img, blend_factor)
+    # Blend with original
+    blended = Image.blend(pil_image, effect_img, blend_factor)
 
-        # Convert back to 16-bit
-        return np.array(blended).astype(np.uint16) * 256
-
-    except Exception as e:
-        print(f"Mandelbrot effect error: {e}")
-        return background
+    # Convert back to 16-bit
+    return np.array(blended).astype(np.uint16) * 256
 
 
 def apply_noise_effect(
@@ -631,7 +627,6 @@ def apply_filter_effect(
 def generate_random_background(
     height: int,
     width: int,
-    bg_type: BackgroundType = None,
     color_range: Tuple[int, int] = (0, UINT16_MAX),
 ) -> np.ndarray:
     """
@@ -640,15 +635,14 @@ def generate_random_background(
     Args:
         height: Image height
         width: Image width
-        bg_type: Type of background to generate
         color_range: Range for random color generation (min, max)
 
     Returns:
         Random background as uint16 array
     """
-    if bg_type is None:
-        bg_type = random.choice(list(BackgroundType))
+    bg_type = random.choice(list(BackgroundType))
 
+    print(bg_type)
     if bg_type == BackgroundType.SOLID:
         background = create_solid_background(height, width, color_range)
 
@@ -692,8 +686,16 @@ def generate_random_background(
                 height, width, None, color_range
             )
 
-    else:  # BackgroundType.SHAPES
+    elif bg_type == BackgroundType.SHAPES:
         background = create_shape_background(height, width, None, None, color_range)
+
+    elif bg_type == BackgroundType.MANDELBROT:
+        extent = (-3, -2.5, 2, 2.5)
+        quality = 100
+        background = Image.effect_mandelbrot((width, height), extent, quality)
+        background = ImageOps.equalize(background)
+        background = background.convert("I;16")
+        background = np.array(background) * 256
 
     # Add subtle noise texture
     if random.random() < 0.5:

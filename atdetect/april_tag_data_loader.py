@@ -28,7 +28,6 @@ class TemplateInfo(NamedTuple):
 
 
 # Import background generation functionality
-from atdetect.background_complexity import BackgroundComplexity
 from atdetect.background_type import BackgroundType
 from atdetect.direction import Direction
 from atdetect.filter_type import FilterType
@@ -41,11 +40,6 @@ from atdetect.effect_type import EffectType
 from atdetect.background_generators import (
     UINT16_MAX,
     generate_random_background,
-    apply_mandelbrot_effect,
-    apply_noise_effect,
-    apply_filter_effect,
-    create_radial_gradient_background,
-    create_linear_gradient_background,
 )
 
 
@@ -62,7 +56,6 @@ class AprilTagDataLoader:
         max_img_size: int = 1024,
         tags_per_image: Tuple[int, int] = (1, 3),
         bg_color_range: Tuple[int, int] = (5000, 20000),  # 16-bit range
-        bg_complexity: BackgroundComplexity = BackgroundComplexity.MEDIUM,
         brightness_variation_range: float = 0.3,
         min_rotation: float = 0.0,  # Minimum rotation angle in degrees
         max_rotation: float = 360.0,  # Maximum rotation angle in degrees
@@ -100,7 +93,6 @@ class AprilTagDataLoader:
         self.max_img_size = max(self.min_img_size + 64, max_img_size)
         self.tags_per_image = tags_per_image
         self.bg_color_range = bg_color_range
-        self.bg_complexity = bg_complexity
         self.brightness_variation_range = max(
             0.0, min(1.0, brightness_variation_range)
         )  # Clamp to [0, 1]
@@ -834,93 +826,6 @@ class AprilTagDataLoader:
         while True:
             yield self.generate_sample()
 
-    def _apply_pil_effects(
-        self, image: np.ndarray, height: int, width: int
-    ) -> np.ndarray:
-        """
-        Apply PIL-based effects to enhance background complexity.
-
-        Args:
-            image: Input image to apply effects to
-            height: Image height
-            width: Image width
-
-        Returns:
-            Modified image with PIL effects applied
-        """
-        # Choose a random effect type
-        effect_type = random.choice(list(EffectType))
-
-        if effect_type == EffectType.MANDELBROT:
-            # Apply mandelbrot effect using the dedicated function
-            image = apply_mandelbrot_effect(image)
-
-        elif effect_type == EffectType.NOISE:
-            # Apply noise effect using the dedicated function
-            image = apply_noise_effect(image)
-
-        elif effect_type == EffectType.LINEAR_GRADIENT:
-            # Create a linear gradient using the dedicated function
-            direction = random.choice(list(Direction))
-            gradient_bg = create_linear_gradient_background(
-                height, width, direction, (0, UINT16_MAX)
-            )
-
-            # Blend with the original image
-            blend_factor = random.uniform(0.3, 0.8)
-            image = (
-                image.astype(np.float32) * (1 - blend_factor)
-                + gradient_bg.astype(np.float32) * blend_factor
-            ).astype(np.uint16)
-
-        elif effect_type == EffectType.RADIAL_GRADIENT:
-            # Create a radial gradient using the dedicated function
-            center = (random.randint(0, width - 1), random.randint(0, height - 1))
-            bright_center = random.choice([True, False])
-            gradient_bg = create_radial_gradient_background(
-                height, width, center, bright_center, (0, UINT16_MAX)
-            )
-
-            # Blend with the original image
-            blend_factor = random.uniform(0.3, 0.8)
-            image = (
-                image.astype(np.float32) * (1 - blend_factor)
-                + gradient_bg.astype(np.float32) * blend_factor
-            ).astype(np.uint16)
-
-        elif effect_type == EffectType.COMBINED:
-            # Apply multiple effects
-            # First a gradient (either linear or radial)
-            if random.random() < 0.5:
-                gradient_bg = create_linear_gradient_background(
-                    height, width, Direction.DIAGONAL, (0, UINT16_MAX)
-                )
-                blend_factor = random.uniform(0.3, 0.6)
-                image = (
-                    image.astype(np.float32) * (1 - blend_factor)
-                    + gradient_bg.astype(np.float32) * blend_factor
-                ).astype(np.uint16)
-            else:
-                center = (random.randint(0, width - 1), random.randint(0, height - 1))
-                gradient_bg = create_radial_gradient_background(
-                    height, width, center, True, (0, UINT16_MAX)
-                )
-                blend_factor = random.uniform(0.3, 0.6)
-                image = (
-                    image.astype(np.float32) * (1 - blend_factor)
-                    + gradient_bg.astype(np.float32) * blend_factor
-                ).astype(np.uint16)
-
-            # Then add noise effect
-            image = apply_noise_effect(image)
-
-        # Apply additional filters
-        filter_type = random.choice(list(FilterType))
-        if filter_type != FilterType.NONE:
-            image = apply_filter_effect(image, filter_type)
-
-        return image
-
     def _generate_background(self, height: int, width: int) -> np.ndarray:
         """
         Generate a complex background image with textures, gradients, or patterns.
@@ -933,9 +838,7 @@ class AprilTagDataLoader:
             16-bit background image with interesting patterns
         """
         # Use the dedicated background generator module
-        background = generate_random_background(
-            height, width, None, self.bg_color_range
-        )
+        background = generate_random_background(height, width, self.bg_color_range)
 
         return background
 

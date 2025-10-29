@@ -3,7 +3,6 @@ Deep April Tag Detector package.
 """
 
 # Import enum classes
-from atdetect.background_complexity import BackgroundComplexity
 from atdetect.background_type import BackgroundType
 from atdetect.direction import Direction
 from atdetect.shape_type import ShapeType

@@ -11,4 +11,5 @@ RUN apt-get update \
 RUN conda install -y \
     opencv \
     pillow \
+    tqdm \
     ipdb
