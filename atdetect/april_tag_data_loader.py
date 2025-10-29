@@ -7,7 +7,6 @@ import random
 import numpy as np
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Optional
-import cv2
 from pathlib import Path
 from PIL import Image, ImageOps, ImageFilter, ImageDraw
 import math
@@ -155,10 +154,12 @@ class AprilTagDataLoader:
         new_h, new_w = max(1, int(h * scale_factor)), max(
             1, int(w * scale_factor)
         )  # Ensure size is at least 1x1
-        scaled_template = cv2.resize(
-            template, (new_w, new_h), interpolation=cv2.INTER_NEAREST
+        template_pil = Image.fromarray(template)
+        mask_pil = Image.fromarray(mask)
+        scaled_template = np.array(
+            template_pil.resize((new_w, new_h), resample=Image.NEAREST)
         )
-        scaled_mask = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+        scaled_mask = np.array(mask_pil.resize((new_w, new_h), resample=Image.NEAREST))
         return scaled_template, scaled_mask
 
     @staticmethod
@@ -185,10 +186,19 @@ class AprilTagDataLoader:
         h, w = template.shape[:2]
         center = (w // 2, h // 2)  # Center of the template
 
-        # Get rotation matrix
-        rotation_matrix = cv2.getRotationMatrix2D(
-            center, -angle, 1.0
-        )  # Negative angle for clockwise rotation
+        # Calculate rotation matrix manually (2x3 matrix)
+        angle_rad = math.radians(-angle)  # Negative angle for clockwise rotation
+        cos_val = math.cos(angle_rad)
+        sin_val = math.sin(angle_rad)
+
+        # Create rotation matrix [cos, -sin, x_shift; sin, cos, y_shift]
+        rotation_matrix = np.zeros((2, 3), dtype=np.float32)
+        rotation_matrix[0, 0] = cos_val
+        rotation_matrix[0, 1] = -sin_val
+        rotation_matrix[1, 0] = sin_val
+        rotation_matrix[1, 1] = cos_val
+        rotation_matrix[0, 2] = (1 - cos_val) * center[0] + sin_val * center[1]
+        rotation_matrix[1, 2] = -sin_val * center[0] + (1 - cos_val) * center[1]
 
         # Calculate new dimensions after rotation to ensure the entire template is visible
         # Convert rotation matrix to radians
@@ -204,21 +214,47 @@ class AprilTagDataLoader:
         rotation_matrix[0, 2] += (new_w - w) // 2
         rotation_matrix[1, 2] += (new_h - h) // 2
 
-        # Apply rotation to template and mask
-        rotated_template = cv2.warpAffine(
-            template,
-            rotation_matrix,
-            (new_w, new_h),
-            flags=cv2.INTER_NEAREST,
-            borderMode=cv2.BORDER_CONSTANT,
+        # Apply rotation to template and mask using PIL
+        # First adjust rotation matrix for new dimensions
+        rotation_matrix[0, 2] += (new_w - w) / 2
+        rotation_matrix[1, 2] += (new_h - h) / 2
+
+        # Convert rotation matrix to PIL's transform format
+        # PIL's transform format is (a, b, c, d, e, f) which corresponds to
+        # [a c e] in the matrix form [x']
+        # [b d f]                     [y']
+        #                             [1 ]
+        pil_transform = (
+            rotation_matrix[0, 0],
+            rotation_matrix[1, 0],
+            rotation_matrix[0, 1],
+            rotation_matrix[1, 1],
+            rotation_matrix[0, 2],
+            rotation_matrix[1, 2],
         )
-        rotated_mask = cv2.warpAffine(
-            mask,
-            rotation_matrix,
+
+        # Apply transform
+        template_pil = Image.fromarray(template)
+        mask_pil = Image.fromarray(mask)
+
+        rotated_template_pil = template_pil.transform(
             (new_w, new_h),
-            flags=cv2.INTER_NEAREST,
-            borderMode=cv2.BORDER_CONSTANT,
+            Image.AFFINE,
+            pil_transform,
+            resample=Image.NEAREST,
+            fillcolor=0,
         )
+
+        rotated_mask_pil = mask_pil.transform(
+            (new_w, new_h),
+            Image.AFFINE,
+            pil_transform,
+            resample=Image.NEAREST,
+            fillcolor=0,
+        )
+
+        rotated_template = np.array(rotated_template_pil)
+        rotated_mask = np.array(rotated_mask_pil)
 
         # Rotate keypoints
         rotated_keypoints = []
@@ -286,20 +322,38 @@ class AprilTagDataLoader:
         # We need the 2x3 portion of the 3x3 matrix for warpAffine
         skew_matrix_2x3 = final_skew_matrix[:2, :]
 
-        final_template = cv2.warpAffine(
-            rotated_template,
-            skew_matrix_2x3,
-            (final_w, final_h),
-            flags=cv2.INTER_NEAREST,
-            borderMode=cv2.BORDER_CONSTANT,
+        # Convert skew matrix to PIL's transform format
+        pil_skew_transform = (
+            skew_matrix_2x3[0, 0],
+            skew_matrix_2x3[1, 0],
+            skew_matrix_2x3[0, 1],
+            skew_matrix_2x3[1, 1],
+            skew_matrix_2x3[0, 2],
+            skew_matrix_2x3[1, 2],
         )
-        final_mask = cv2.warpAffine(
-            rotated_mask,
-            skew_matrix_2x3,
+
+        # Apply transform using PIL
+        rotated_template_pil = Image.fromarray(rotated_template)
+        rotated_mask_pil = Image.fromarray(rotated_mask)
+
+        final_template_pil = rotated_template_pil.transform(
             (final_w, final_h),
-            flags=cv2.INTER_NEAREST,
-            borderMode=cv2.BORDER_CONSTANT,
+            Image.AFFINE,
+            pil_skew_transform,
+            resample=Image.NEAREST,
+            fillcolor=0,
         )
+
+        final_mask_pil = rotated_mask_pil.transform(
+            (final_w, final_h),
+            Image.AFFINE,
+            pil_skew_transform,
+            resample=Image.NEAREST,
+            fillcolor=0,
+        )
+
+        final_template = np.array(final_template_pil)
+        final_mask = np.array(final_mask_pil)
 
         # Apply skew to rotated keypoints
         final_keypoints = []
@@ -489,9 +543,16 @@ class AprilTagDataLoader:
         class_num = self.class_nums[idx]
 
         # Load template and convert to 16-bit
-        template = cv2.imread(
-            str(template_path), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_GRAYSCALE
-        )
+        template_pil = Image.open(str(template_path))
+        if template_pil.mode != "I":  # Check if already 16-bit grayscale
+            # Convert to grayscale if needed
+            if template_pil.mode != "L":
+                template_pil = template_pil.convert("L")
+            # Convert to 16-bit
+            template_arr = np.array(template_pil)
+            template = template_arr.astype(np.uint16) * 256
+        else:
+            template = np.array(template_pil)
         if template is None:
             print(f"Failed to load template: {template_path}")
             return None
@@ -665,13 +726,13 @@ class AprilTagDataLoader:
         # Convert gradient to numpy and resize to match template dimensions
         gradient_array = np.array(gradient_map).astype(np.float32)
 
-        # Resize gradient to match template dimensions
+        # Resize gradient to match template dimensions using PIL
         template_shape = template.shape
-        gradient_resized = cv2.resize(
-            gradient_array,
-            (template_shape[1], template_shape[0]),
-            interpolation=cv2.INTER_LINEAR,
+        gradient_pil = Image.fromarray(gradient_array.astype(np.uint32))
+        gradient_resized_pil = gradient_pil.resize(
+            (template_shape[1], template_shape[0]), resample=Image.BILINEAR
         )
+        gradient_resized = np.array(gradient_resized_pil).astype(np.float32)
 
         # Normalize gradient to 0-1 range
         gradient_normalized = gradient_resized / 65535.0
@@ -720,10 +781,23 @@ class AprilTagDataLoader:
         # Choose a random rotation angle
         rotation_angle = random.uniform(self.min_rotation, self.max_rotation)
 
-        # Get rotation matrix
-        rotation_matrix = cv2.getRotationMatrix2D(
-            center, -rotation_angle, 1.0
+        # Create our own rotation matrix (2x3 matrix)
+        angle_rad = math.radians(
+            -rotation_angle
         )  # Negative angle for clockwise rotation
+        cos_val = math.cos(angle_rad)
+        sin_val = math.sin(angle_rad)
+
+        # Create rotation matrix [cos, -sin, x_shift; sin, cos, y_shift]
+        rotation_matrix = np.zeros((2, 3), dtype=np.float32)
+        rotation_matrix[0, 0] = cos_val
+        rotation_matrix[0, 1] = -sin_val
+        rotation_matrix[1, 0] = sin_val
+        rotation_matrix[1, 1] = cos_val
+
+        # Calculate shift to rotate around the center point
+        rotation_matrix[0, 2] = (1 - cos_val) * center[0] + sin_val * center[1]
+        rotation_matrix[1, 2] = -sin_val * center[0] + (1 - cos_val) * center[1]
 
         # Calculate new dimensions after rotation
         angle_rad = math.radians(rotation_angle)
@@ -738,21 +812,38 @@ class AprilTagDataLoader:
         rotation_matrix[0, 2] += (new_w - w) // 2
         rotation_matrix[1, 2] += (new_h - h) // 2
 
-        # Apply rotation to grid template and mask
-        rotated_template = cv2.warpAffine(
-            grid_template,
-            rotation_matrix,
-            (new_w, new_h),
-            flags=cv2.INTER_NEAREST,
-            borderMode=cv2.BORDER_CONSTANT,
+        # Convert rotation matrix to PIL's transform format
+        pil_transform = (
+            rotation_matrix[0, 0],
+            rotation_matrix[1, 0],
+            rotation_matrix[0, 1],
+            rotation_matrix[1, 1],
+            rotation_matrix[0, 2],
+            rotation_matrix[1, 2],
         )
-        rotated_mask = cv2.warpAffine(
-            grid_mask,
-            rotation_matrix,
+
+        # Apply transform using PIL
+        grid_template_pil = Image.fromarray(grid_template)
+        grid_mask_pil = Image.fromarray(grid_mask)
+
+        rotated_template_pil = grid_template_pil.transform(
             (new_w, new_h),
-            flags=cv2.INTER_NEAREST,
-            borderMode=cv2.BORDER_CONSTANT,
+            Image.AFFINE,
+            pil_transform,
+            resample=Image.NEAREST,
+            fillcolor=0,
         )
+
+        rotated_mask_pil = grid_mask_pil.transform(
+            (new_w, new_h),
+            Image.AFFINE,
+            pil_transform,
+            resample=Image.NEAREST,
+            fillcolor=0,
+        )
+
+        rotated_template = np.array(rotated_template_pil)
+        rotated_mask = np.array(rotated_mask_pil)
 
         # Update annotations with rotated keypoints
         rotated_annotations = []

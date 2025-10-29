@@ -5,7 +5,7 @@ import dataclasses
 import yaml
 import os
 import numpy as np
-import cv2
+from PIL import Image, ImageDraw, ImageFont
 
 import torch
 import torch.distributed as dist
@@ -109,38 +109,39 @@ def make_examples(args):
         for annotation in sample.annotations:
             # Draw bounding box
             bbox = annotation.bbox
-            cv2.rectangle(
-                vis_image,
-                (int(bbox.x_min), int(bbox.y_min)),
-                (int(bbox.x_max), int(bbox.y_max)),
-                (0, 255, 0),  # Green color
-                2,
+            vis_image_pil = Image.fromarray(vis_image)
+            draw = ImageDraw.Draw(vis_image_pil)
+
+            draw.rectangle(
+                [
+                    (int(bbox.x_min), int(bbox.y_min)),
+                    (int(bbox.x_max), int(bbox.y_max)),
+                ],
+                outline=(0, 255, 0),  # Green color
+                width=2,
             )
 
             # Draw keypoints
             for kp in annotation.keypoints:
-                cv2.circle(
-                    vis_image,
-                    (int(kp.x), int(kp.y)),
-                    5,  # Radius
-                    (0, 0, 255),  # Red color
-                    -1,  # Filled
+                draw.ellipse(
+                    [(int(kp.x) - 5, int(kp.y) - 5), (int(kp.x) + 5, int(kp.y) + 5)],
+                    fill=(0, 0, 255),  # Red color
                 )
 
             # Draw class information
-            cv2.putText(
-                vis_image,
-                f"{annotation.class_name} #{annotation.class_num}",
+            # No built-in font, use simple text drawing
+            draw.text(
                 (int(bbox.x_min), int(bbox.y_min) - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (255, 255, 0),  # Yellow color
-                1,
+                f"{annotation.class_name} #{annotation.class_num}",
+                fill=(255, 255, 0),  # Yellow color
             )
 
+            # Update the numpy array with the modified image
+            vis_image = np.array(vis_image_pil)
+
         # Save both raw image and visualization
-        cv2.imwrite(f"output/sample_{i}.png", image_8bit)
-        cv2.imwrite(f"output/sample_{i}_annotated.png", vis_image)
+        Image.fromarray(image_8bit).save(f"output/sample_{i}.png")
+        Image.fromarray(vis_image).save(f"output/sample_{i}_annotated.png")
 
     print(f"Generated 5 sample images in the 'output' directory for visualization.")
     print(

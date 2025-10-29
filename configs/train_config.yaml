@@ -1,0 +1,10 @@
+# Sample training configuration for AprilTag detector
+
+# Simple configuration matching TrainConfig dataclass structure
+model_name: "apriltag_detector_v1"
+learning_rate: 0.001
+batch_size: 8
+epochs: 50
+tag_type: "tag16h5"
+val_split: 0.2
+checkpoint_dir: "output/checkpoints"

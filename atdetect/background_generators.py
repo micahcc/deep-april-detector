@@ -7,7 +7,6 @@ for synthetic AprilTag training images. All functions operate on uint16 grayscal
 
 import random
 import numpy as np
-import cv2
 from PIL import Image, ImageFilter
 from typing import Tuple, List, Optional, Union, Callable
 
@@ -216,8 +215,8 @@ def create_perlin_noise_background(
     )
 
     # Resize to full size using bilinear interpolation
-
-    scaled = cv2.resize(base, (width, height), interpolation=cv2.INTER_LINEAR)
+    base_pil = Image.fromarray(base)
+    scaled = np.array(base_pil.resize((width, height), resample=Image.BILINEAR))
 
     # Add octaves for more detail
     for i in range(1, octaves):
@@ -228,8 +227,9 @@ def create_perlin_noise_background(
         small_height = height // small_scale + 1
         small_width = width // small_scale + 1
         small = np.random.randint(0, 2000, (small_height, small_width), dtype=np.uint16)
-        small_scaled = cv2.resize(
-            small, (width, height), interpolation=cv2.INTER_LINEAR
+        small_pil = Image.fromarray(small)
+        small_scaled = np.array(
+            small_pil.resize((width, height), resample=Image.BILINEAR)
         )
         scaled = scaled + small_scaled / (2**i)
 
@@ -421,9 +421,25 @@ def create_shape_background(
                 thickness = random.choice([-1, random.randint(1, 5)])  # -1 means filled
 
                 # Draw circle
-                cv2.circle(
-                    background, (center_x, center_y), radius, shape_color, thickness
-                )
+                draw = ImageDraw.Draw(Image.fromarray(background))
+                if thickness == -1:  # Filled circle
+                    draw.ellipse(
+                        [
+                            (center_x - radius, center_y - radius),
+                            (center_x + radius, center_y + radius),
+                        ],
+                        fill=shape_color,
+                    )
+                else:  # Outlined circle
+                    for i in range(thickness):
+                        draw.ellipse(
+                            [
+                                (center_x - radius + i, center_y - radius + i),
+                                (center_x + radius - i, center_y + radius - i),
+                            ],
+                            outline=shape_color,
+                        )
+                background = np.array(draw.im)
 
             elif shape_type == ShapeType.RECTANGLE:
                 # Random rectangle
@@ -434,7 +450,15 @@ def create_shape_background(
                 thickness = random.choice([-1, random.randint(1, 5)])  # -1 means filled
 
                 # Draw rectangle
-                cv2.rectangle(background, (x1, y1), (x2, y2), shape_color, thickness)
+                draw = ImageDraw.Draw(Image.fromarray(background))
+                if thickness == -1:  # Filled rectangle
+                    draw.rectangle([(x1, y1), (x2, y2)], fill=shape_color)
+                else:  # Outlined rectangle
+                    for i in range(thickness):
+                        draw.rectangle(
+                            [(x1 + i, y1 + i), (x2 - i, y2 - i)], outline=shape_color
+                        )
+                background = np.array(draw.im)
 
             else:  # ShapeType.LINE
                 # Random line
@@ -445,7 +469,9 @@ def create_shape_background(
                 thickness = random.randint(1, 5)
 
                 # Draw line
-                cv2.line(background, (x1, y1), (x2, y2), shape_color, thickness)
+                draw = ImageDraw.Draw(Image.fromarray(background))
+                draw.line([(x1, y1), (x2, y2)], fill=shape_color, width=thickness)
+                background = np.array(draw.im)
 
     return background
 
