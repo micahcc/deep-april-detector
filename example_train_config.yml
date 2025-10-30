@@ -4,3 +4,4 @@ batch_size: 32
 epochs: 100
 tag_type: tag16h5
 checkpoint_dir: ./checkpoints
+model_config_path: ./configs/yolov3-tiny.cfg

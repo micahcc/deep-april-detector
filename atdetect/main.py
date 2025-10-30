@@ -19,8 +19,8 @@ from atdetect.export_config import ExportConfig
 
 # Import data loader components
 from atdetect.april_tag_data_loader import AprilTagDataLoader
-from atdetect.models.detector import AprilTagDetector
 from atdetect.trainer import Trainer
+from atdetect.models import load_model
 
 UINT16_MAX = 2**16 - 1
 
@@ -299,11 +299,8 @@ def train_worker(rank: int, world_size: int, config: TrainConfig, distributed: b
     num_classes = get_num_classes_from_tag_type(config.tag_type)
 
     # Create model
-    model = AprilTagDetector(
-        input_channels=1,  # Default to 1 for mono16 images
-        fpn_channels=256,  # Default FPN channels
-        num_classes=num_classes,
-    )
+
+    model = load_model(config.model_config_path)
 
     # Create datasets
     # Use standard data directory structure

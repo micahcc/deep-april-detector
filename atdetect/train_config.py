@@ -1,15 +1,18 @@
 """
 Configuration for training.
 """
+
 import dataclasses
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
+
 
 @dataclass
 class TrainConfig:
     """Configuration for training."""
 
     model_name: str
+    model_config_path: str
     learning_rate: float
     batch_size: int
     epochs: int

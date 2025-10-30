@@ -19,9 +19,6 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 
-from atdetect.models.detector import AprilTagDetector
-from atdetect.models.loss import AprilTagLoss
-
 
 class Trainer:
     """
@@ -81,9 +78,6 @@ class Trainer:
         self.rank = rank
         self.world_size = world_size
         self.eval_interval = eval_interval
-
-        # Create loss function
-        self.criterion = AprilTagLoss().to(device)
 
         # Set up the model
         self.model = model.to(device)
@@ -239,9 +233,9 @@ class Trainer:
         with torch.no_grad():
             for batch_idx, batch in enumerate(self.val_dataloader):
                 # Get inputs and targets
-                images = batch["image"].to(self.device)
+                images = batch["images"].to(self.device)
                 targets = {
-                    "boxes": batch["boxes"].to(self.device),
+                    "boxes": batch["bboxes"].to(self.device),
                     "keypoints": batch["keypoints"].to(self.device),
                     "labels": batch["labels"].to(self.device),
                 }
